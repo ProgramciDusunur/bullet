@@ -6,7 +6,7 @@ There's potentially a lot of elo available by adjusting the wdl
 and lr schedulers, depending on your dataset.
 */
 use bullet_lib::{
-    game::inputs::Chess768,
+    game::inputs::ChessBucketsMirrored,
     nn::optimiser::AdamW,
     trainer::{
         save::SavedFormat,
@@ -16,7 +16,7 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 
-const HIDDEN_SIZE: usize = 128;
+const HIDDEN_SIZE: usize = 64;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
 const QB: i16 = 64;
@@ -28,8 +28,8 @@ fn main() {
         // standard optimiser used in NNUE
         // the default AdamW params include clipping to range [-1.98, 1.98]
         .optimiser(AdamW)
-        // basic piece-square chessboard inputs
-        .inputs(Chess768)
+        // basic piece-square chessboard inputs, mirrored horizontally
+        .inputs(ChessBucketsMirrored::default())
         // chosen such that inference may be efficiently implemented in-engine
         .save_format(&[
             SavedFormat::id("l0w").round().quantise::<i16>(QA),
@@ -55,57 +55,39 @@ fn main() {
             l1.forward(hidden_layer)
         });
 
+    let superbatches = 160;
     let schedule = TrainingSchedule {
-        net_id: "simple".to_string(),
+        net_id: "potential-64hl-linear".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
             batches_per_superbatch: 6104,
             start_superbatch: 1,
-            end_superbatch: 40,
+            end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::ConstantWDL { value: 0.75 },
-        lr_scheduler: lr::StepLR { start: 0.001, gamma: 0.1, step: 18 },
-        save_rate: 10,
+        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
+        lr_scheduler: lr::CosineDecayLR { 
+            initial_lr: 0.001, 
+            final_lr: 0.001 * 0.3f32.powi(5), 
+            final_superbatch: superbatches 
+        },
+        save_rate: 5,
     };
 
-    let settings = LocalSettings { threads: 4, test_set: None, output_directory: "checkpoints", batch_queue_size: 64 };
+    let settings = LocalSettings { threads: 16, test_set: None, output_directory: "checkpoints", batch_queue_size: 64 };
 
-    // loading from a Viriformat binpack
-    let _data_loader_viri = {
+    // loading from our generated Viriformat file
+    let data_loader = {
         use loader::viribinpack::{Filter, ViriBinpackLoader, ViriFilter};
 
-        let file_path = "data/run_2024-06-05_12-12-45_1500000g-4t-tb6-classical-n5000.binpack";
-        let buffer_size_mb = 1024;
-        let threads = 4;
+        let file_path = "../2m-64hl.vf";
+        let buffer_size_mb = 4096;
+        let threads = 16;
 
-        // The `viriformat` crate exposes a useful `Filter` of its own, but you can also
-        // use a custom function like for SF binpacks with `ViriFilter::custom(function)`
         let filter = ViriFilter::Builtin(Filter::default());
 
         ViriBinpackLoader::new(file_path, buffer_size_mb, threads, filter)
     };
-
-    // loading from a SF binpack
-    let _data_loader_sf = {
-        use loader::sfbinpack::{MoveType, PieceType, SfBinpackLoader, TrainingDataEntry};
-
-        let file_path = "data/test80-2024-02-feb-2tb7p.min-v2.v6.binpack";
-        let buffer_size_mb = 1024;
-        let threads = 4;
-        fn filter(entry: &TrainingDataEntry) -> bool {
-            entry.ply >= 16
-                && !entry.pos.is_checked(entry.pos.side_to_move())
-                && entry.score.unsigned_abs() <= 10000
-                && entry.mv.mtype() == MoveType::Normal
-                && entry.pos.piece_at(entry.mv.to()).piece_type() == PieceType::None
-        }
-
-        SfBinpackLoader::new(file_path, buffer_size_mb, threads, filter)
-    };
-
-    // loading directly from a `BulletFormat` file
-    let data_loader = loader::DirectSequentialDataLoader::new(&["data/baseline.data"]);
 
     trainer.run(&schedule, &settings, &data_loader);
 }
