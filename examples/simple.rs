@@ -107,19 +107,42 @@ fn main() {
         save_rate: 5,
     };
 
-    let settings = LocalSettings { threads: 4, test_set: None, output_directory: "checkpoints", batch_queue_size: 64 };
+    let is_kaggle = std::path::Path::new("/kaggle").exists();
 
-    // loading from our generated Viriformat file
+    let (trainer_threads, loader_threads, batch_queue) = if is_kaggle {
+        (8, 36, 256) 
+    } else {
+        (4, 12, 64)
+    };
+
+    let buffer_size_mb = if is_kaggle {
+        16384 
+    } else {
+        4096 
+    };
+
+    let file_path = if is_kaggle {
+        "/kaggle/input/datasets/kirill020708/dataset/combined.vf"
+    } else {
+        "../combined.vf"
+    };
+
+    let settings = LocalSettings { 
+        threads: trainer_threads, 
+        test_set: None, 
+        output_directory: "checkpoints", 
+        batch_queue_size: batch_queue
+    };
+
     let data_loader = {
         use loader::viribinpack::{Filter, ViriBinpackLoader};
 
-        let file_path = "../combined.vf";
-        let buffer_size_mb = 4096;
-        let threads = 12;
+        let filter = Filter {
+            wdl_filtered: true,
+            ..Default::default()
+        };
 
-        let filter = Filter::default();
-
-        ViriBinpackLoader::new(file_path, buffer_size_mb, threads, filter)
+        ViriBinpackLoader::new(file_path, buffer_size_mb, loader_threads, filter)
     };
 
     trainer.run(&schedule, &settings, &data_loader);
