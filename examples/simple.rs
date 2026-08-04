@@ -90,7 +90,7 @@ fn main() {
 
     let superbatches = 160;
     let schedule = TrainingSchedule {
-        net_id: "potential-128hl-3-4buckets".to_string(),
+        net_id: "potential-128hl-4-wdl-skipping".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
