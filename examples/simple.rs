@@ -90,7 +90,7 @@ fn main() {
 
     let superbatches = 160;
     let schedule = TrainingSchedule {
-        net_id: "potential-128hl-4-wdl-skipping".to_string(),
+        net_id: "potential-128hl-4-fen-skipping".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -138,7 +138,9 @@ fn main() {
         use loader::viribinpack::{Filter, ViriBinpackLoader};
 
         let filter = Filter {
-            wdl_filtered: true,
+            wdl_filtered: false,
+            random_fen_skipping: true,
+            random_fen_skip_probability: 0.15,
             ..Default::default()
         };
 
