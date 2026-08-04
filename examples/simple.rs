@@ -6,8 +6,8 @@ There's potentially a lot of elo available by adjusting the wdl
 and lr schedulers, depending on your dataset.
 */
 use bullet_lib::{
-    game::inputs::ChessBucketsMirrored,
-    nn::optimiser::AdamW,
+    game::{inputs::{ChessBucketsMirrored, get_num_buckets}, outputs::MaterialCount},
+    nn::{optimiser::{AdamW, AdamWParams}, InitSettings, Shape},
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
@@ -16,10 +16,25 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 
-const HIDDEN_SIZE: usize = 64;
+const HIDDEN_SIZE: usize = 128;
+const NUM_OUTPUT_BUCKETS: usize = 8;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
 const QB: i16 = 64;
+
+#[rustfmt::skip]
+const BUCKET_LAYOUT: [usize; 32] = [
+    0, 0, 1, 1,
+    2, 2, 2, 2,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+];
+
+const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
 
 fn main() {
     let mut trainer = ValueTrainerBuilder::default()
@@ -29,13 +44,21 @@ fn main() {
         // the default AdamW params include clipping to range [-1.98, 1.98]
         .optimiser(AdamW)
         // basic piece-square chessboard inputs, mirrored horizontally
-        .inputs(ChessBucketsMirrored::default())
+        .inputs(ChessBucketsMirrored::new(BUCKET_LAYOUT))
+        // 8 output buckets based on material count
+        .output_buckets(MaterialCount::<NUM_OUTPUT_BUCKETS>)
         // chosen such that inference may be efficiently implemented in-engine
         .save_format(&[
-            SavedFormat::id("l0w").round().quantise::<i16>(QA),
+            SavedFormat::id("l0w")
+                .transform(|store, weights| {
+                    let factoriser = store.get("l0f").values.f32().repeat(NUM_INPUT_BUCKETS);
+                    weights.into_iter().zip(factoriser).map(|(a, b)| a + b).collect()
+                })
+                .round()
+                .quantise::<i16>(QA),
             SavedFormat::id("l0b").round().quantise::<i16>(QA),
-            SavedFormat::id("l1w").round().quantise::<i16>(QB),
-            SavedFormat::id("l1b").round().quantise::<i16>(QA * QB),
+            SavedFormat::id("l1w").round().quantise::<i16>(QB).transpose(),
+            SavedFormat::id("l1b").round().quantise::<i16>(QA * QB).transpose(),
         ])
         // map output into ranges [0, 1] to fit against our labels which
         // are in the same range
@@ -43,21 +66,31 @@ fn main() {
         // where `wdl` is determined by `wdl_scheduler`
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         // the basic `(768 -> N)x2 -> 1` inference
-        .build(|builder, stm_inputs, ntm_inputs| {
-            // weights
-            let l0 = builder.new_affine("l0", 768, HIDDEN_SIZE);
-            let l1 = builder.new_affine("l1", 2 * HIDDEN_SIZE, 1);
+        .build(|builder, stm_inputs, ntm_inputs, buckets| {
+            // input layer factoriser
+            let l0f = builder.new_weights("l0f", Shape::new(HIDDEN_SIZE, 768), InitSettings::Zeroed);
+            let expanded_factoriser = l0f.repeat(NUM_INPUT_BUCKETS);
+
+            // input layer weights
+            let mut l0 = builder.new_affine("l0", 768 * NUM_INPUT_BUCKETS, HIDDEN_SIZE);
+            l0.weights = l0.weights + expanded_factoriser;
+
+            let l1 = builder.new_affine("l1", 2 * HIDDEN_SIZE, NUM_OUTPUT_BUCKETS);
 
             // inference
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
             let hidden_layer = stm_hidden.concat(ntm_hidden);
-            l1.forward(hidden_layer)
+            l1.forward(hidden_layer).select(buckets)
         });
+
+    let stricter_clipping = AdamWParams { max_weight: 0.99, min_weight: -0.99, ..Default::default() };
+    trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
+    trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
     let superbatches = 160;
     let schedule = TrainingSchedule {
-        net_id: "potential-64hl-linear".to_string(),
+        net_id: "potential-128hl-3-4buckets".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -74,17 +107,17 @@ fn main() {
         save_rate: 5,
     };
 
-    let settings = LocalSettings { threads: 16, test_set: None, output_directory: "checkpoints", batch_queue_size: 64 };
+    let settings = LocalSettings { threads: 4, test_set: None, output_directory: "checkpoints", batch_queue_size: 64 };
 
     // loading from our generated Viriformat file
     let data_loader = {
-        use loader::viribinpack::{Filter, ViriBinpackLoader, ViriFilter};
+        use loader::viribinpack::{Filter, ViriBinpackLoader};
 
-        let file_path = "../2m-64hl.vf";
+        let file_path = "../combined.vf";
         let buffer_size_mb = 4096;
-        let threads = 16;
+        let threads = 12;
 
-        let filter = ViriFilter::Builtin(Filter::default());
+        let filter = Filter::default();
 
         ViriBinpackLoader::new(file_path, buffer_size_mb, threads, filter)
     };
