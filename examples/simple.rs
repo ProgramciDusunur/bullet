@@ -16,7 +16,7 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 
-const HIDDEN_SIZE: usize = 128;
+const HIDDEN_SIZE: usize = 256;
 const NUM_OUTPUT_BUCKETS: usize = 8;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
@@ -90,7 +90,7 @@ fn main() {
 
     let superbatches = 160;
     let schedule = TrainingSchedule {
-        net_id: "potential-128hl-4-fen/wdl-skipping".to_string(),
+        net_id: "potential-256hl".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -138,9 +138,9 @@ fn main() {
         use loader::viribinpack::{Filter, ViriBinpackLoader};
 
         let filter = Filter {
-            wdl_filtered: true,
-            random_fen_skipping: true,
-            random_fen_skip_probability: 0.15,
+            // wdl_filtered: true,
+            // random_fen_skipping: true,
+            // random_fen_skip_probability: 0.15,
             ..Default::default()
         };
 
