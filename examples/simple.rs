@@ -138,7 +138,7 @@ fn main() {
         use loader::viribinpack::{Filter, ViriBinpackLoader};
 
         let filter = Filter {
-            wdl_filtered: false,
+            wdl_filtered: true,
             random_fen_skipping: true,
             random_fen_skip_probability: 0.15,
             ..Default::default()
