@@ -88,9 +88,12 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let superbatches = 160;
+    let main_superbatches = 160;
+    let ft_superbatches = 40;
+    let superbatches = main_superbatches + ft_superbatches;
+
     let schedule = TrainingSchedule {
-        net_id: "potential-256hl-2-warmup-batches-800".to_string(),
+        net_id: "potential-256hl-3-finetune".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -98,14 +101,22 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
-        lr_scheduler: lr::Warmup {
-            inner: lr::CosineDecayLR { 
-                initial_lr: 0.001, 
-                final_lr: 0.001 * 0.3f32.powi(5), 
-                final_superbatch: superbatches 
+        wdl_scheduler: wdl::Sequence {
+            first: wdl::LinearWDL { start: 0.2, end: 0.5 },
+            second: wdl::ConstantWDL { value: 0.95 },
+            first_scheduler_final_superbatch: main_superbatches,
+        },
+        lr_scheduler: lr::Sequence {
+            first: lr::Warmup {
+                inner: lr::CosineDecayLR { 
+                    initial_lr: 0.001, 
+                    final_lr: 0.001 * 0.3f32.powi(5), 
+                    final_superbatch: main_superbatches 
+                },
+                warmup_batches: 800,
             },
-            warmup_batches: 800,
+            second: lr::ConstantLR { value: 1e-5 },
+            first_scheduler_final_superbatch: main_superbatches,
         },
         save_rate: 5,
     };
