@@ -90,7 +90,7 @@ fn main() {
 
     let superbatches = 160;
     let schedule = TrainingSchedule {
-        net_id: "potential-256hl".to_string(),
+        net_id: "potential-256hl-2-warmup-batches-800".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -99,10 +99,13 @@ fn main() {
             end_superbatch: superbatches,
         },
         wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
-        lr_scheduler: lr::CosineDecayLR { 
-            initial_lr: 0.001, 
-            final_lr: 0.001 * 0.3f32.powi(5), 
-            final_superbatch: superbatches 
+        lr_scheduler: lr::Warmup {
+            inner: lr::CosineDecayLR { 
+                initial_lr: 0.001, 
+                final_lr: 0.001 * 0.3f32.powi(5), 
+                final_superbatch: superbatches 
+            },
+            warmup_batches: 800,
         },
         save_rate: 5,
     };
