@@ -88,25 +88,42 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let superbatches = 160;
+    let stage0_sbs = 32;
+    let stage1_sbs = 160;
 
-    let schedule = TrainingSchedule {
-        net_id: "potential-256hl-3".to_string(),
+    let stage0_schedule = TrainingSchedule {
+        net_id: "potential-256hl-3-stage0".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
             batches_per_superbatch: 6104,
             start_superbatch: 1,
-            end_superbatch: superbatches,
+            end_superbatch: stage0_sbs,
         },
-        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.6 },
-        lr_scheduler: lr::Warmup {
-            inner: lr::CosineDecayLR { 
-                initial_lr: 0.001, 
-                final_lr: 0.001 * 0.3f32.powi(5), 
-                final_superbatch: superbatches 
-            },
-            warmup_batches: 800,
+        wdl_scheduler: wdl::ConstantWDL { value: 0.2 },
+        
+        lr_scheduler: lr::LinearDecayLR { 
+            initial_lr: 0.0001, 
+            final_lr: 0.001, 
+            final_superbatch: stage0_sbs 
+        },
+        save_rate: 10,
+    };
+
+    let stage1_schedule = TrainingSchedule {
+        net_id: "potential-256hl-3-stage1".to_string(),
+        eval_scale: SCALE as f32,
+        steps: TrainingSteps {
+            batch_size: 16_384,
+            batches_per_superbatch: 6104,
+            start_superbatch: 1,
+            end_superbatch: stage1_sbs,
+        },
+        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
+        lr_scheduler: lr::CosineDecayLR { 
+            initial_lr: 0.001, 
+            final_lr: 0.001 * 0.3f32.powi(5), 
+            final_superbatch: stage1_sbs 
         },
         save_rate: 5,
     };
@@ -151,7 +168,8 @@ fn main() {
         ViriBinpackLoader::new(file_path, buffer_size_mb, loader_threads, filter)
     };
 
-    trainer.run(&schedule, &settings, &data_loader);
+    trainer.run(&stage0_schedule, &settings, &data_loader);
+    trainer.run(&stage1_schedule, &settings, &data_loader);
 }
 
 // ============ EXAMPLE INFERENCE STARTS HERE ============
