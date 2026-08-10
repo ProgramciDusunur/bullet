@@ -88,10 +88,10 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let superbatches = 160;
+    let superbatches = 300;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-512hl".to_string(),
+        net_id: "potential-512hl-300sb".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
