@@ -16,8 +16,8 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 
-const HIDDEN_SIZE: usize = 512;
-const NUM_OUTPUT_BUCKETS: usize = 16;
+const HIDDEN_SIZE: usize = 768;
+const NUM_OUTPUT_BUCKETS: usize = 8;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
 const QB: i16 = 64;
@@ -91,7 +91,7 @@ fn main() {
     let superbatches = 160;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-512hl-16ob".to_string(),
+        net_id: "potential-768hl".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
