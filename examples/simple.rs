@@ -7,7 +7,7 @@ and lr schedulers, depending on your dataset.
 */
 use bullet_lib::{
     game::{inputs::{ChessBucketsMirrored, get_num_buckets}, outputs::MaterialCount},
-    nn::{optimiser::{Ranger, RangerParams}, InitSettings, Shape},
+    nn::{optimiser::{AdamW, AdamWParams}, InitSettings, Shape},
     trainer::{
         save::SavedFormat,
         schedule::{TrainingSchedule, TrainingSteps, lr, wdl},
@@ -16,7 +16,7 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader},
 };
 
-const HIDDEN_SIZE: usize = 512;
+const HIDDEN_SIZE: usize = 1024;
 const NUM_OUTPUT_BUCKETS: usize = 8;
 const SCALE: i32 = 400;
 const QA: i16 = 255;
@@ -42,7 +42,7 @@ fn main() {
         .dual_perspective()
         // standard optimiser used in NNUE
         // the default AdamW params include clipping to range [-1.98, 1.98]
-        .optimiser(Ranger)
+        .optimiser(AdamW)
         // basic piece-square chessboard inputs, mirrored horizontally
         .inputs(ChessBucketsMirrored::new(BUCKET_LAYOUT))
         // 8 output buckets based on material count
@@ -84,14 +84,14 @@ fn main() {
             l1.forward(hidden_layer).select(buckets)
         });
 
-    let stricter_clipping = RangerParams { max_weight: 0.99, min_weight: -0.99, ..Default::default() };
+    let stricter_clipping = AdamWParams { max_weight: 0.99, min_weight: -0.99, ..Default::default() };
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
     let superbatches = 160;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-512hl-ranger".to_string(),
+        net_id: "potential-1024hl".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
