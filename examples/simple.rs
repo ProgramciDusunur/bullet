@@ -24,14 +24,14 @@ const QB: i16 = 64;
 
 #[rustfmt::skip]
 const BUCKET_LAYOUT: [usize; 32] = [
-    0, 1, 2, 3,
-    4, 4, 5, 5,
-    6, 6, 6, 6,
-    6, 6, 6, 6,
-    7, 7, 7, 7,
-    7, 7, 7, 7,
-    7, 7, 7, 7,
-    7, 7, 7, 7,
+    0, 0, 1, 1,
+    2, 2, 2, 2,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
+    3, 3, 3, 3,
 ];
 
 const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
@@ -88,10 +88,12 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let superbatches = 480;
+    let main_superbatches = 480;
+    let ft_superbatches = 60;
+    let superbatches = main_superbatches + ft_superbatches;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-1024hl-8b".to_string(),
+        net_id: "potential-1024hl-4b-finetune".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -99,16 +101,28 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
-        lr_scheduler: lr::Warmup {
-            inner: lr::CosineDecayLR { 
-                initial_lr: 0.001, 
-                final_lr: 0.001 * 0.3f32.powi(5), 
-                final_superbatch: superbatches 
-            },
-            warmup_batches: 800,
+        wdl_scheduler: wdl::Sequence {
+            first: wdl::LinearWDL { start: 0.2, end: 0.5 },
+            second: wdl::ConstantWDL { value: 0.7 },
+            first_scheduler_final_superbatch: main_superbatches,
         },
-        save_rate: 5,
+        lr_scheduler: lr::Sequence {
+            first: lr::Warmup {
+                inner: lr::CosineDecayLR { 
+                    initial_lr: 0.001, 
+                    final_lr: 0.001 * 0.3f32.powi(4), 
+                    final_superbatch: main_superbatches 
+                },
+                warmup_batches: 800,
+            },
+            second: lr::CosineDecayLR { 
+                initial_lr: 0.001 * 0.3f32.powi(4), 
+                final_lr: 0.001 * 0.3f32.powi(5), 
+                final_superbatch: ft_superbatches 
+            },
+            first_scheduler_final_superbatch: main_superbatches,
+        },
+        save_rate: 25,
     };
 
     let is_kaggle = std::path::Path::new("/kaggle").exists();
