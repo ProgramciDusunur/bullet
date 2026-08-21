@@ -126,7 +126,11 @@ fn main() {
     };
 
     let file_path = if is_kaggle {
-        "/kaggle/input/dataset/combined.vf_evals_relabeled"
+        if std::path::Path::new("/kaggle/input/dataset-relabelled/combined.vf_evals_relabeled").exists() {
+            "/kaggle/input/dataset-relabelled/combined.vf_evals_relabeled"
+        } else {
+            "/kaggle/input/dataset_relabelled/combined.vf_evals_relabeled"
+        }
     } else {
         "../combined.vf_evals_relabeled"
     };
