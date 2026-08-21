@@ -88,12 +88,10 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let main_superbatches = 480;
-    let ft_superbatches = 60;
-    let superbatches = main_superbatches + ft_superbatches;
+    let superbatches = 480;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-1024hl-4b-finetune".to_string(),
+        net_id: "potential-1024hl-480sb-ban".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -101,26 +99,14 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::Sequence {
-            first: wdl::LinearWDL { start: 0.2, end: 0.5 },
-            second: wdl::ConstantWDL { value: 0.7 },
-            first_scheduler_final_superbatch: main_superbatches,
-        },
-        lr_scheduler: lr::Sequence {
-            first: lr::Warmup {
-                inner: lr::CosineDecayLR { 
-                    initial_lr: 0.001, 
-                    final_lr: 0.001 * 0.3f32.powi(4), 
-                    final_superbatch: main_superbatches 
-                },
-                warmup_batches: 800,
-            },
-            second: lr::CosineDecayLR { 
-                initial_lr: 0.001 * 0.3f32.powi(4), 
+        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
+        lr_scheduler: lr::Warmup {
+            inner: lr::CosineDecayLR { 
+                initial_lr: 0.001, 
                 final_lr: 0.001 * 0.3f32.powi(5), 
-                final_superbatch: ft_superbatches 
+                final_superbatch: superbatches 
             },
-            first_scheduler_final_superbatch: main_superbatches,
+            warmup_batches: 800,
         },
         save_rate: 25,
     };
@@ -140,9 +126,9 @@ fn main() {
     };
 
     let file_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/dataset/combined.vf"
+        "/kaggle/input/dataset/combined.vf_evals_relabeled"
     } else {
-        "../combined.vf"
+        "../combined.vf_evals_relabeled"
     };
 
     let settings = LocalSettings { 
