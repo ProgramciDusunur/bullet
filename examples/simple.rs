@@ -88,29 +88,6 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let superbatches = 400;
-
-    let schedule = TrainingSchedule {
-        net_id: "potential-1024hl-400sb-ban".to_string(),
-        eval_scale: SCALE as f32,
-        steps: TrainingSteps {
-            batch_size: 16_384,
-            batches_per_superbatch: 6104,
-            start_superbatch: 1,
-            end_superbatch: superbatches,
-        },
-        wdl_scheduler: wdl::LinearWDL { start: 0.075, end: 0.2 },
-        lr_scheduler: lr::Warmup {
-            inner: lr::CosineDecayLR { 
-                initial_lr: 0.001, 
-                final_lr: 0.001 * 0.3f32.powi(5), 
-                final_superbatch: superbatches 
-            },
-            warmup_batches: 800,
-        },
-        save_rate: 25,
-    };
-
     let is_kaggle = std::path::Path::new("/kaggle").exists();
 
     let (trainer_threads, loader_threads, batch_queue) = if is_kaggle {
@@ -125,12 +102,6 @@ fn main() {
         4096 
     };
 
-    let file_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/dataset-relabelled/combined.vf_evals_relabeled"
-    } else {
-        "../combined.vf_evals_relabeled"
-    };
-
     let settings = LocalSettings { 
         threads: trainer_threads, 
         test_set: None, 
@@ -138,20 +109,95 @@ fn main() {
         batch_queue_size: batch_queue
     };
 
-    let data_loader = {
-        use loader::viribinpack::{Filter, ViriBinpackLoader};
+    // =========================================================================
+    // STAGE 1: PRE-TRAINING (Low WDL on Rescored Data)
+    // =========================================================================
+    let pretrain_sb = 400;
 
-        let filter = Filter {
-            // wdl_filtered: true,
-            // random_fen_skipping: true,
-            // random_fen_skip_probability: 0.15,
-            ..Default::default()
-        };
-
-        ViriBinpackLoader::new(file_path, buffer_size_mb, loader_threads, filter)
+    let schedule_pretrain = TrainingSchedule {
+        net_id: "potential-1024hl-400sb-ban".to_string(),
+        eval_scale: SCALE as f32,
+        steps: TrainingSteps {
+            batch_size: 16_384,
+            batches_per_superbatch: 6104,
+            start_superbatch: 1,
+            end_superbatch: pretrain_sb,
+        },
+        wdl_scheduler: wdl::LinearWDL { start: 0.075, end: 0.2 },
+        lr_scheduler: lr::Warmup {
+            inner: lr::CosineDecayLR { 
+                initial_lr: 0.001, 
+                final_lr: 0.001 * 0.3f32.powi(4), 
+                final_superbatch: pretrain_sb 
+            },
+            warmup_batches: 800,
+        },
+        save_rate: 25,
     };
 
-    trainer.run(&schedule, &settings, &data_loader);
+    let file_path_pretrain = if is_kaggle {
+        "/kaggle/input/datasets/kirill020708/dataset-relabelled/combined.vf_evals_relabeled"
+    } else {
+        "../combined.vf_evals_relabeled"
+    };
+
+    let data_loader_pretrain = {
+        use loader::viribinpack::{Filter, ViriBinpackLoader};
+        let filter = Filter { ..Default::default() };
+        ViriBinpackLoader::new(file_path_pretrain, buffer_size_mb, loader_threads, filter)
+    };
+
+    println!("============================================================");
+    println!("STARTING STAGE 1: PRE-TRAINING (BAN) on Rescored Data");
+    println!("Dataset: {}", file_path_pretrain);
+    println!("Superbatches: 1 -> {}", pretrain_sb);
+    println!("============================================================");
+
+    trainer.run(&schedule_pretrain, &settings, &data_loader_pretrain);
+
+    // =========================================================================
+    // STAGE 2: FINE-TUNING (Normal WDL on Original Data)
+    // =========================================================================
+    let finetune_sb = 80;
+    let total_sb = pretrain_sb + finetune_sb;
+
+    let schedule_finetune = TrainingSchedule {
+        net_id: "potential-1024hl-480sb-finetuned".to_string(),
+        eval_scale: SCALE as f32,
+        steps: TrainingSteps {
+            batch_size: 16_384,
+            batches_per_superbatch: 6104,
+            start_superbatch: pretrain_sb + 1,
+            end_superbatch: total_sb,
+        },
+        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
+        lr_scheduler: lr::CosineDecayLR { 
+            initial_lr: 0.001 * 0.3f32.powi(4), 
+            final_lr: 0.001 * 0.3f32.powi(5), 
+            final_superbatch: total_sb 
+        },
+        save_rate: 10,
+    };
+
+    let file_path_finetune = if is_kaggle {
+        "/kaggle/input/datasets/kirill020708/dataset/combined.vf"
+    } else {
+        "../combined.vf"
+    };
+
+    let data_loader_finetune = {
+        use loader::viribinpack::{Filter, ViriBinpackLoader};
+        let filter = Filter { ..Default::default() };
+        ViriBinpackLoader::new(file_path_finetune, buffer_size_mb, loader_threads, filter)
+    };
+
+    println!("============================================================");
+    println!("STARTING STAGE 2: FINE-TUNING on Original Data");
+    println!("Dataset: {}", file_path_finetune);
+    println!("Superbatches: {} -> {}", pretrain_sb + 1, total_sb);
+    println!("============================================================");
+
+    trainer.run(&schedule_finetune, &settings, &data_loader_finetune);
 }
 
 // ============ EXAMPLE INFERENCE STARTS HERE ============
