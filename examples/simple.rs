@@ -88,10 +88,10 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
-    let superbatches = 480;
+    let superbatches = 400;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-1024hl-480sb-ban".to_string(),
+        net_id: "potential-1024hl-400sb-ban".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -99,7 +99,7 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::LinearWDL { start: 0.2, end: 0.5 },
+        wdl_scheduler: wdl::LinearWDL { start: 0.075, end: 0.2 },
         lr_scheduler: lr::Warmup {
             inner: lr::CosineDecayLR { 
                 initial_lr: 0.001, 
