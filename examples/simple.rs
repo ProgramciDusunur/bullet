@@ -126,7 +126,7 @@ fn main() {
     };
 
     let file_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/dataset/1024hl-dataset.vf"
+        "/kaggle/input/datasets/kirill020708/1024hl-dataset/combined-1024hl.vf"
     } else {
         "../combined.vf"
     };
