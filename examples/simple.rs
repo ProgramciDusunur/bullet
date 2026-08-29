@@ -91,7 +91,7 @@ fn main() {
     let superbatches = 480;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-1024hl".to_string(),
+        net_id: "potential-1024hl-2".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -126,7 +126,7 @@ fn main() {
     };
 
     let file_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/dataset/combined.vf"
+        "/kaggle/input/datasets/kirill020708/dataset/1024hl-dataset.vf"
     } else {
         "../combined.vf"
     };
