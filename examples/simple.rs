@@ -91,7 +91,7 @@ fn main() {
     let superbatches = 1000;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-2048hl-chonker-v2".to_string(),
+        net_id: "potential-2048hl-chonker-v3".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
@@ -99,7 +99,11 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: superbatches,
         },
-        wdl_scheduler: wdl::ConstantWDL { value: 1.0 },
+        wdl_scheduler: wdl::Sequence {
+            first: wdl::LinearWDL { start: 0.0, end: 1.0 },
+            second: wdl::ConstantWDL { value: 1.0 },
+            first_scheduler_final_superbatch: 200,
+        },
         lr_scheduler: lr::Warmup {
             inner: lr::CosineDecayLR { 
                 initial_lr: 0.001, 
