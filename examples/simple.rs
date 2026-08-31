@@ -118,6 +118,20 @@ fn main() {
     } else {
         (4, 12, 64)
     };
+    // loading from a Viriformat binpack
+    let _data_loader_viri = {
+        use loader::viribinpack::{Filter, ViriBinpackLoader, ViriFilter};
+
+        let file_path = "data/viri.vf";
+        let buffer_size_mb = 1024;
+        let threads = 4;
+
+        // The `viriformat` crate exposes a useful `Filter` of its own, but you can also
+        // use a custom function like for SF binpacks with `ViriFilter::custom(function)`
+        let filter = ViriFilter::Builtin(Filter::default());
+
+        ViriBinpackLoader::new(file_path, buffer_size_mb, threads, filter)
+    };
 
     let buffer_size_mb = if is_kaggle {
         16384 
