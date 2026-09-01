@@ -93,10 +93,10 @@ fn main() {
         "../combined-1024hl.vf"
     };
 
-    let (loader_threads, batch_queue) = if is_kaggle {
-        (36, 256) 
+    let (loader_threads, mapper_threads) = if is_kaggle {
+        (36, 16) 
     } else {
-        (12, 64)
+        (12, 4)
     };
     
     let buffer_size_mb = if is_kaggle { 16384 } else { 4096 };
@@ -238,7 +238,7 @@ fn main() {
     train(
         &mut optimiser,
         schedule,
-        ReadMapLoader::new(reader, mapper, batch_queue as u8),
+        ReadMapLoader::new(reader, mapper, mapper_threads as u8),
         |_, _, _| {},
         |optimiser, step| {
             let superbatch = step.superbatch();
