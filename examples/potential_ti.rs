@@ -150,16 +150,16 @@ fn main() {
             })
             .round()
             .quantise::<i16>(QA),
-        SavedFormat::id("l0/threats/w").round().quantise::<i16>(QA),
-        SavedFormat::id("l0/threats/b").round().quantise::<i16>(QA),
-        SavedFormat::id("l1/w").round().quantise::<i16>(QB).transpose(),
-        SavedFormat::id("l1/b").round().quantise::<i16>(QA * QB).transpose(),
+        SavedFormat::id("l0/threatsw").round().quantise::<i16>(QA),
+        SavedFormat::id("l0/threatsb").round().quantise::<i16>(QA),
+        SavedFormat::id("l1w").round().quantise::<i16>(QB).transpose(),
+        SavedFormat::id("l1b").round().quantise::<i16>(QA * QB).transpose(),
     ];
 
     let stricter_clipping = AdamWParams { max_weight: 0.99, min_weight: -0.99, ..Default::default() };
     optimiser.set_params_for_weight("l0/psqt", stricter_clipping);
     optimiser.set_params_for_weight("l0/fac", stricter_clipping);
-    optimiser.set_params_for_weight("l0/threats/w", stricter_clipping);
+    optimiser.set_params_for_weight("l0/threatsw", stricter_clipping);
 
     let superbatches = 480;
 
