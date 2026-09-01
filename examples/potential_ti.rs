@@ -88,9 +88,9 @@ fn main() {
     let is_kaggle = std::path::Path::new("/kaggle").exists();
 
     let data_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/1024hl-tb5-relabelled/1024hl-tb5-relabelled.vf"
+        "/kaggle/input/datasets/kirill020708/1024hl-dataset/combined-1024hl.vf"
     } else {
-        "../combined.vf"
+        "../combined-1024hl.vf"
     };
 
     let (loader_threads, batch_queue) = if is_kaggle {
@@ -159,6 +159,7 @@ fn main() {
     let stricter_clipping = AdamWParams { max_weight: 0.99, min_weight: -0.99, ..Default::default() };
     optimiser.set_params_for_weight("l0/psqt", stricter_clipping);
     optimiser.set_params_for_weight("l0/fac", stricter_clipping);
+    optimiser.set_params_for_weight("l0/threats/w", stricter_clipping);
 
     let superbatches = 480;
 
