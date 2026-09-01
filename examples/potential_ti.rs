@@ -1,6 +1,6 @@
 #[path = "advanced/filter.rs"]
 mod filter;
-#[path = "advanced/inputs.rs"]
+#[path = "ti_inputs.rs"]
 mod inputs;
 
 use std::sync::Arc;
