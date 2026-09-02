@@ -33,7 +33,7 @@ use bullet_trainer::{
     run::{DefaultDevice, TrainingSchedule, TrainingSteps, train},
 };
 
-const HIDDEN_SIZE: usize = 1024;
+const HIDDEN_SIZE: usize = 384;
 const NUM_OUTPUT_BUCKETS: usize = 8;
 const QA: i16 = 255;
 const QB: i16 = 64;
@@ -233,7 +233,7 @@ fn main() {
         }
     );
 
-    let net_id = "potential-ti-1024hl";
+    let net_id = "potential-ti-384hl";
 
     train(
         &mut optimiser,
