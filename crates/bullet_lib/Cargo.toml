@@ -64,3 +64,8 @@ path = "../../examples/advanced/main.rs"
 [[example]]
 name = "potential_ti"
 path = "../../examples/potential_ti.rs"
+
+[[example]]
+name = "multilayer"
+path = "../../examples/multilayer.rs"
+
