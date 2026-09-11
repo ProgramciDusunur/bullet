@@ -73,14 +73,15 @@ fn main() {
             l0.weights = l0.weights + expanded_factoriser;
 
             let l1 = builder.new_affine("l1", 2 * HIDDEN_SIZE, NUM_OUTPUT_BUCKETS * L2_SIZE);
-            let l2 = builder.new_affine("l2", L2_SIZE, NUM_OUTPUT_BUCKETS * L3_SIZE);
+            let l2 = builder.new_affine("l2", 2 * L2_SIZE, NUM_OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, NUM_OUTPUT_BUCKETS);
 
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
             let hidden_layer = stm_hidden.concat(ntm_hidden);
 
-            let l1_out = l1.forward(hidden_layer).select(buckets).screlu();
+            let l1_out = l1.forward(hidden_layer).select(buckets);
+            let l1_out = l1_out.concat(l1_out.abs_pow(2.0)).crelu();
             let l2_out = l2.forward(l1_out).select(buckets).crelu();
             l3.forward(l2_out).select(buckets)
         });
