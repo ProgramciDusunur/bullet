@@ -174,38 +174,33 @@ fn convert_buffer(threads: usize, sender: &SyncSender<Vec<ChessBoard>>, games: &
 }
 
 fn parse_into_buffer(game: &Game, buffer: &mut Vec<ChessBoard>, filter: &ViriFilter) {
-    match filter {
-        ViriFilter::Builtin(filter) => {
-            game.splat_to_bulletformat(
-                |board| {
-                    buffer.push(board);
-                    Ok(())
+    let mut rng = rand::rng();
+    let (mut board, _, wdl, _) = game.initial_position.unpack();
+    let outcome = WDL::from_packed(wdl);
+
+    for (mv, eval) in &game.moves {
+        let eval_val = eval.get();
+        let should_filter = match filter {
+            ViriFilter::Builtin(f) => f.should_filter(*mv, eval_val.into(), &board, outcome, &mut rng),
+            ViriFilter::Custom(f) => f(
+                &board,
+                *mv,
+                eval_val as i16,
+                match outcome {
+                    WDL::Win => 1.0,
+                    WDL::Draw => 0.5,
+                    WDL::Loss => 0.0,
                 },
-                filter,
-            )
-            .unwrap();
+            ),
+        };
+
+        if !should_filter {
+            if let Ok(mut bf) = board.to_bulletformat(wdl, eval_val) {
+                bf.extra[0] = board.fifty_move_counter().min(100) as u8;
+                buffer.push(bf);
+            }
         }
-        ViriFilter::Custom(filter) => {
-            game.splat_to_bulletformat_with_filter_callback(
-                |board| {
-                    buffer.push(board);
-                    Ok(())
-                },
-                |mv, eval, board, wdl, _| {
-                    !filter(
-                        board,
-                        mv,
-                        eval as i16,
-                        match wdl {
-                            WDL::Win => 1.0,
-                            WDL::Draw => 0.5,
-                            WDL::Loss => 0.0,
-                        },
-                    )
-                },
-            )
-            .unwrap();
-        }
+        board.make_move_simple(*mv);
     }
 }
 
