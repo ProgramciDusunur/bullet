@@ -126,7 +126,7 @@ fn main() {
     let buffer_size_mb = if is_kaggle { 16384 } else { 4096 };
 
     let file_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/1024hl-dataset/1024hl-multilayer-15m-games.vf"
+        "/kaggle/input/datasets/kirill020708/1024hl-multilayer-15m-games/1024hl-multilayer-15m-games.vf"
     } else {
         "../1024hl-multilayer-15m-games.vf"
     };
