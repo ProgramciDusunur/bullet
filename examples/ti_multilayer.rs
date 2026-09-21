@@ -6,10 +6,7 @@ mod inputs;
 use std::sync::Arc;
 use bullet_lib::{
     game::{
-        formats::{
-            bulletformat::ChessBoard,
-            montyformat::chess::{Piece, Side},
-        },
+        formats::bulletformat::ChessBoard,
         inputs::{ChessBucketsMirrored, SparseInputType},
         outputs::{MaterialCount, OutputBuckets},
     },
@@ -24,7 +21,7 @@ use bullet_lib::{
     wdl::WdlScheduler,
 };
 use bullet_trainer::{
-    model::{DenseInput, InitSettings, ModelDefinition, ModelInputs, ModelInputsMapper, ModelWeights, SavedFormat, SparseInput},
+    model::{DenseInput, InitSettings, ModelDefinition, ModelEvaluator, ModelInputs, ModelInputsMapper, ModelWeights, SavedFormat, SparseInput},
     optimiser::{
         Optimiser,
         adam::{AdamW, AdamWParams},
@@ -153,7 +150,8 @@ fn main() {
     let device = DefaultDevice::new(0).unwrap();
     let weights = ModelWeights::new(&defn, 12412421);
     let params = AdamWParams::default();
-    let mut optimiser = Optimiser::<_, AdamW<_>>::new(defn, weights, device, params).unwrap();
+    let mut evaluator = ModelEvaluator::new(&defn, device.clone()).unwrap();
+    let mut optimiser = Optimiser::<_, AdamW<_>>::new(defn, weights, device.clone(), params).unwrap();
 
     let saved_format = vec![
         SavedFormat::id("l0/psqt")
@@ -170,7 +168,7 @@ fn main() {
                 values.iter().map(|f| f / (FT_SHIFT_SCALE * FT_SHIFT_SCALE)).collect()
             })
             .round()
-            .quantise::<i8>(Q1 as i8),
+            .quantise::<i8>(Q1),
         SavedFormat::id("l1b").round().quantise::<i32>(i32::from(Q) * 256),
         SavedFormat::id("l2w").round().quantise::<i32>(i32::from(Q)),
         SavedFormat::id("l2b").round().quantise::<i32>(i32::from(Q).pow(3)),
@@ -213,50 +211,55 @@ fn main() {
         ViriFilter::Custom(filter::should_keep)
     );
 
-    let mapper = ModelInputsMapper::build(
-        &model_inputs,
-        move |pos, step, (((((stm_threats, ntm_threats), stm_psqt), ntm_psqt), buckets), target)| {
-            let mut cnt = 0;
-            psqt.map_features(pos, |stm, ntm| {
-                stm_psqt[cnt] = stm.try_into().unwrap();
-                ntm_psqt[cnt] = ntm.try_into().unwrap();
-                cnt += 1;
-            });
-            if cnt < psqt.max_active() {
-                stm_psqt[cnt] = -1;
-                ntm_psqt[cnt] = -1;
-            }
+    let make_mapper = |psqt: ChessBucketsMirrored, threats: ThreatInputs, output_buckets: MaterialCount<NUM_OUTPUT_BUCKETS>| {
+        ModelInputsMapper::build(
+            &model_inputs,
+            move |pos, step, (((((stm_threats, ntm_threats), stm_psqt), ntm_psqt), buckets), target)| {
+                let mut cnt = 0;
+                psqt.map_features(pos, |stm, ntm| {
+                    stm_psqt[cnt] = stm.try_into().unwrap();
+                    ntm_psqt[cnt] = ntm.try_into().unwrap();
+                    cnt += 1;
+                });
+                if cnt < psqt.max_active() {
+                    stm_psqt[cnt] = -1;
+                    ntm_psqt[cnt] = -1;
+                }
 
-            let mut stm_cnt = 0;
-            let mut ntm_cnt = 0;
-            threats.map_features(
-                pos,
-                |stm| {
-                    stm_threats[stm_cnt] = stm.try_into().unwrap();
-                    stm_cnt += 1;
-                },
-                |ntm| {
-                    ntm_threats[ntm_cnt] = ntm.try_into().unwrap();
-                    ntm_cnt += 1;
-                },
-            );
-            if stm_cnt < threats.max_active() {
-                stm_threats[stm_cnt] = -1;
-            }
-            if ntm_cnt < threats.max_active() {
-                ntm_threats[ntm_cnt] = -1;
-            }
+                let mut stm_cnt = 0;
+                let mut ntm_cnt = 0;
+                threats.map_features(
+                    pos,
+                    |stm| {
+                        stm_threats[stm_cnt] = stm.try_into().unwrap();
+                        stm_cnt += 1;
+                    },
+                    |ntm| {
+                        ntm_threats[ntm_cnt] = ntm.try_into().unwrap();
+                        ntm_cnt += 1;
+                    },
+                );
+                if stm_cnt < threats.max_active() {
+                    stm_threats[stm_cnt] = -1;
+                }
+                if ntm_cnt < threats.max_active() {
+                    ntm_threats[ntm_cnt] = -1;
+                }
 
-            let bucket = output_buckets.bucket(pos);
-            buckets[0] = bucket as i32;
+                let bucket = output_buckets.bucket(pos);
+                buckets[0] = bucket as i32;
 
-            let result = f32::from(pos.result) / 2.0;
-            let score = 1.0 / (1.0 + (f32::from(-pos.score) / SCALE).exp());
-            let wdl_scheduler = wdl::LinearWDL { start: 0.2, end: 0.5 };
-            let lambda = wdl_scheduler.blend(step.batch(), step.superbatch(), step.final_superbatch());
-            target[0] = lambda * result + (1. - lambda) * score;
-        }
-    );
+                let result = f32::from(pos.result) / 2.0;
+                let score = 1.0 / (1.0 + (f32::from(-pos.score) / SCALE).exp());
+                let wdl_scheduler = wdl::LinearWDL { start: 0.2, end: 0.5 };
+                let lambda = wdl_scheduler.blend(step.batch(), step.superbatch(), step.final_superbatch());
+                target[0] = lambda * result + (1. - lambda) * score;
+            },
+        )
+    };
+
+    let mapper = make_mapper(psqt, threats.clone(), output_buckets);
+    let eval_mapper = make_mapper(psqt, threats, output_buckets);
 
     let net_id = "potential-ti-384hl-ml";
 
@@ -274,6 +277,8 @@ fn main() {
             }
         },
     ).unwrap();
+
+    evaluator.load_device_weights(optimiser.weights()).unwrap();
 
     for fen in [
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -352,8 +357,13 @@ fn main() {
         "6K1/8/b6R/N2p2P1/8/q1Q5/6r1/2Bk3n b - - 0 1",
         "7K/r2R3b/1Q6/8/2q5/1nPB2k1/N3p3/8 w - - 0 1",
     ] {
-        let eval = optimiser.eval(fen);
+        let pos = format!("{fen} | 0 | 0.0").parse().unwrap();
+        let inputs = eval_mapper.map(&[pos], Default::default(), 1).to_device(&device).unwrap();
+        let output = evaluator.evaluate(&inputs).unwrap().get("output").unwrap();
+        let [value] = output.to_host().unwrap().f32()[..] else { panic!() };
         println!("FEN: {fen}");
-        println!("EVAL: {}", SCALE * eval);
+        println!("EVAL: {}", SCALE * value);
     }
 }
+
+

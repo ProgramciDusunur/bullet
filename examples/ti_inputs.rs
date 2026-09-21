@@ -1,8 +1,4 @@
-use std::sync::Arc;
-use bullet_lib::game::formats::{
-    bulletformat::ChessBoard,
-    montyformat::chess::{Attacks, Piece, Side},
-};
+use bullet_lib::game::formats::montyformat::chess::{Attacks, Piece, Side};
 
 pub struct Threats {
     pawn_map: [usize; 12],
