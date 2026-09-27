@@ -73,14 +73,20 @@ fn main() {
             l0.weights = l0.weights + expanded_factoriser;
 
             let l1 = builder.new_affine("l1", 2 * HIDDEN_SIZE, NUM_OUTPUT_BUCKETS * L2_SIZE);
-            let l2 = builder.new_affine("l2", L2_SIZE, NUM_OUTPUT_BUCKETS * L3_SIZE);
+            let l2 = builder.new_affine("l2", 3 * L2_SIZE, NUM_OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, NUM_OUTPUT_BUCKETS);
 
             let stm_hidden = l0.forward(stm_inputs).screlu();
             let ntm_hidden = l0.forward(ntm_inputs).screlu();
             let hidden_layer = stm_hidden.concat(ntm_hidden);
 
-            let l1_out = l1.forward(hidden_layer).select(buckets).screlu();
+            let l1_out = l1.forward(hidden_layer).select(buckets);
+            let act1 = l1_out.crelu();
+            let act2 = l1_out.screlu();
+            // Third Activation: Asymmetric Clamp (-0.5)
+            let act3 = l1_out.min(0.0).max(-0.5);
+            let l1_out = act1.concat(act2).concat(act3);
+
             let l2_out = l2.forward(l1_out).select(buckets).crelu();
             l3.forward(l2_out).select(buckets)
         });
@@ -95,7 +101,7 @@ fn main() {
     let superbatches = 480;
 
     let schedule = TrainingSchedule {
-        net_id: "potential-1024hl-ml".to_string(),
+        net_id: "potential-1024hl-triple-act".to_string(),
         eval_scale: SCALE as f32,
         steps: TrainingSteps {
             batch_size: 16_384,
