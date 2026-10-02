@@ -126,9 +126,9 @@ fn main() {
     let buffer_size_mb = if is_kaggle { 16384 } else { 4096 };
 
     let file_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/combined-multilayer-30m-games/combined-multilayer-30m-games.vf"
+        "/kaggle/input/datasets/kirill020708/combined-multilayer-45m-games/combined-multilayer-45m-games.vf"
     } else {
-        "../combined-multilayer-30m-games.vf"
+        "../combined-multilayer-45m-games.vf"
     };
 
     let settings = LocalSettings {
