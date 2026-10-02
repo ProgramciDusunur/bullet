@@ -94,9 +94,9 @@ fn main() {
     let is_kaggle = std::path::Path::new("/kaggle").exists();
 
     let data_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/combined-multilayer-30m-games/combined-multilayer-30m-games.vf"
+        "/kaggle/input/datasets/kirill020708/combined-multilayer-45m-games/combined-multilayer-45m-games.vf"
     } else {
-        "../combined-multilayer-30m-games.vf"
+        "../combined-multilayer-45m-games.vf"
     };
 
     let (loader_threads, mapper_threads) = if is_kaggle {
