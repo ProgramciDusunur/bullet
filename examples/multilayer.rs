@@ -149,4 +149,30 @@ fn main() {
     };
 
     trainer.run(&schedule, &settings, &data_loader);
+
+    
+    // STAGE 2: FINE-TUNING
+    let ft_superbatches = 100;
+
+    let schedule_ft = TrainingSchedule {
+        net_id: "potential-1024hl-ml-finetuned".to_string(),
+        eval_scale: SCALE as f32,
+        steps: TrainingSteps {
+            batch_size: 16_384,
+            batches_per_superbatch: 6104,
+            start_superbatch: 1,
+            end_superbatch: ft_superbatches,
+        },        
+        wdl_scheduler: wdl::LinearWDL { start: 0.7, end: 0.7 },
+        // Düşük Learning Rate: 1e-4'ten 1e-5'e yumuşak düşüş
+        lr_scheduler: lr::CosineDecayLR {
+            initial_lr: 0.0001,
+            final_lr: 0.00001,
+            final_superbatch: ft_superbatches,
+        },
+        save_rate: 10,
+    };
+
+    println!("Starting Stage 2: Fine-Tuning");
+    trainer.run(&schedule_ft, &settings, &data_loader);
 }
