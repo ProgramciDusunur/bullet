@@ -152,7 +152,7 @@ fn main() {
 
     
     // STAGE 2: FINE-TUNING
-    let ft_superbatches = 300;
+    let ft_superbatches = 150;
 
     let schedule_ft = TrainingSchedule {
         net_id: "potential-1024hl-ml-finetuned".to_string(),
@@ -163,7 +163,7 @@ fn main() {
             start_superbatch: 1,
             end_superbatch: ft_superbatches,
         },        
-        wdl_scheduler: wdl::LinearWDL { start: 0.7, end: 0.7 },        
+        wdl_scheduler: wdl::LinearWDL { start: 0.525, end: 0.6 },        
         lr_scheduler: lr::CosineDecayLR {
             initial_lr: 0.0001,
             final_lr: 0.00001,
