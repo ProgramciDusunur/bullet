@@ -1,8 +1,7 @@
 #[path = "advanced/filter.rs"]
 mod filter;
-#[path = "ti_pp_inputs.rs"]
+#[path = "ti_inputs.rs"]
 mod inputs;
-use inputs::pawn_pawn_inputs;
 
 use std::sync::Arc;
 use bullet_lib::{
@@ -89,7 +88,102 @@ impl ThreatInputs {
     }
 }
 
-pub type InputTy = ((((SparseInput, SparseInput), SparseInput), SparseInput), DenseInput<f32>);
+pub type InputTy = ((((((SparseInput, SparseInput), SparseInput), SparseInput), SparseInput), SparseInput), DenseInput<f32>);
+
+
+pub fn three_file_band_mask() -> [u64; 64] {
+    const A: u64 = 0x0101_0101_0101_0101;
+    let mut masks = [0; 64];
+    for (sq, mask) in masks.iter_mut().enumerate().take(56).skip(8) {
+        let f = sq & 7;
+        let mut m: u64 = A << f;
+        if f > 0 { m |= A << (f - 1); }
+        if f < 7 { m |= A << (f + 1); }
+        *mask = m;
+    }
+    masks
+}
+
+fn map_bb_pp<F: FnMut(usize)>(mut bb: u64, mut f: F) {
+    while bb > 0 {
+        let sq = bb.trailing_zeros() as usize;
+        f(sq);
+        bb &= bb - 1;
+    }
+}
+
+fn flip_horizontal(mut bb: u64) -> u64 {
+    const K1: u64 = 0x5555555555555555;
+    const K2: u64 = 0x3333333333333333;
+    const K4: u64 = 0x0f0f0f0f0f0f0f0f;
+    bb = ((bb >> 1) & K1) | ((bb & K1) << 1);
+    bb = ((bb >> 2) & K2) | ((bb & K2) << 2);
+    bb = ((bb >> 4) & K4) | ((bb & K4) << 4);
+    bb
+}
+
+#[derive(Clone)]
+struct PawnPawnInputs {
+    masks: [u64; 64],
+}
+
+impl PawnPawnInputs {
+    pub const TOTAL_PAIRS: usize = 96 * 95 / 2;
+    const MAX_PAIRS: usize = 16 * 15 / 2;
+
+    pub fn new(masks: [u64; 64]) -> Self { Self { masks } }
+    pub fn num_inputs(&self) -> usize { Self::TOTAL_PAIRS }
+    pub fn max_active(&self) -> usize { Self::MAX_PAIRS }
+
+    fn pawn_id(colour: usize, sq: usize) -> usize { colour * 48 + sq - 8 }
+    fn pair_index(id_a: usize, id_b: usize) -> usize {
+        let lo = id_a.min(id_b);
+        let hi = id_a.max(id_b);
+        hi * (hi - 1) / 2 + lo
+    }
+
+    fn emit_same_colour(&self, bb: u64, colour: usize, f: &mut impl FnMut(usize)) {
+        let mut outer = bb;
+        while outer != 0 {
+            let sq_a = outer.trailing_zeros() as usize;
+            outer &= outer - 1;
+            let id_a = Self::pawn_id(colour, sq_a);
+            map_bb_pp(outer & self.masks[sq_a], |sq_b| f(Self::pair_index(id_a, Self::pawn_id(colour, sq_b))));
+        }
+    }
+    
+    fn emit_diff_colour(&self, mut stm_bb: u64, ntm_bb: u64, f: &mut impl FnMut(usize)) {
+        while stm_bb != 0 {
+            let sq_a = stm_bb.trailing_zeros() as usize;
+            let id_a = Self::pawn_id(0, sq_a);
+            map_bb_pp(ntm_bb & self.masks[sq_a], |sq_b| f(Self::pair_index(id_a, Self::pawn_id(1, sq_b))));
+            stm_bb &= stm_bb - 1;
+        }
+    }
+    
+    fn map_features(&self, pos: &ChessBoard, bbs: [u64; 8], mut on_stm: impl FnMut(usize), mut on_ntm: impl FnMut(usize)) {
+        let stm_flip = if pos.our_ksq() % 8 > 3 { 7 } else { 0 };
+        let ntm_flip = if pos.opp_ksq() % 8 > 3 { 7 } else { 0 };
+
+        let mut sp = bbs[2] & bbs[0];
+        let mut np = bbs[2] & bbs[1];
+        if stm_flip > 0 {
+            sp = flip_horizontal(sp);
+            np = flip_horizontal(np);
+        }
+        self.emit_same_colour(sp, 0, &mut |idx| on_stm(idx));
+        self.emit_diff_colour(sp, np, &mut |idx| on_stm(idx));
+
+        let mut sp2 = bbs[2] & bbs[0];
+        let mut np2 = bbs[2] & bbs[1];
+        if ntm_flip > 0 {
+            sp2 = flip_horizontal(sp2);
+            np2 = flip_horizontal(np2);
+        }
+        self.emit_same_colour(np2, 0, &mut |idx| on_ntm(idx));
+        self.emit_diff_colour(np2, sp2, &mut |idx| on_ntm(idx));
+    }
+}
 
 fn main() {
     let is_kaggle = std::path::Path::new("/kaggle").exists();
@@ -109,12 +203,15 @@ fn main() {
     let buffer_size_mb = if is_kaggle { 16384 } else { 4096 };
 
     let psqt = ChessBucketsMirrored::new(BUCKET_LAYOUT);
-    let threats = pawn_pawn_inputs::PawnPawnInputs::new(BUCKET_LAYOUT, pawn_pawn_inputs::three_file_band_mask());
+    let threats = ThreatInputs::new();
+    let pp = PawnPawnInputs::new(three_file_band_mask());
     let output_buckets = MaterialCount::<NUM_OUTPUT_BUCKETS>;
 
     let model_inputs = ModelInputs::default()
         .add_sparse("stm/threats", (threats.num_inputs(), 1), threats.max_active())
         .add_sparse("ntm/threats", (threats.num_inputs(), 1), threats.max_active())
+        .add_sparse("stm/pp", (PawnPawnInputs::TOTAL_PAIRS, 1), PawnPawnInputs::MAX_PAIRS)
+        .add_sparse("ntm/pp", (PawnPawnInputs::TOTAL_PAIRS, 1), PawnPawnInputs::MAX_PAIRS)
         .add_sparse("stm/psqt", (psqt.num_inputs(), 1), psqt.max_active())
         .add_sparse("ntm/psqt", (psqt.num_inputs(), 1), psqt.max_active())
         .add_sparse("buckets", (NUM_OUTPUT_BUCKETS, 1), 1)
@@ -122,9 +219,10 @@ fn main() {
 
     let defn = ModelDefinition::build(
         &model_inputs,
-        |builder, (((((stm_threats, ntm_threats), stm_psqt), ntm_psqt), output_buckets), target)| {
+        |builder, (((((((stm_threats, ntm_threats), stm_pp), ntm_pp), stm_psqt), ntm_psqt), output_buckets), target)| {
             let mut l0_psqt = builder.new_weights("l0/psqt", (L1_SIZE, psqt.num_inputs()), InitSettings::Normal { mean: 0.0, stdev: (2f32 / 32.0).sqrt() });
             let l0_threats = builder.new_affine("l0/threats", threats.num_inputs(), L1_SIZE);
+            let l0_pp = builder.new_affine("l0/pp", PawnPawnInputs::TOTAL_PAIRS, L1_SIZE);
 
             let l0f = builder.new_weights("l0/fac", (L1_SIZE, 768), InitSettings::Zeroed);
             l0_psqt = l0_psqt + l0f.repeat(NUM_INPUT_BUCKETS);
@@ -133,8 +231,8 @@ fn main() {
             let l2 = builder.new_affine("l2", L2_SIZE, NUM_OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, NUM_OUTPUT_BUCKETS);
 
-            let stm_hidden = (l0_psqt.matmul(stm_psqt) + l0_threats.forward(stm_threats)).screlu();
-            let ntm_hidden = (l0_psqt.matmul(ntm_psqt) + l0_threats.forward(ntm_threats)).screlu();
+            let stm_hidden = (l0_psqt.matmul(stm_psqt) + l0_threats.forward(stm_threats) + l0_pp.forward(stm_pp)).screlu();
+            let ntm_hidden = (l0_psqt.matmul(ntm_psqt) + l0_threats.forward(ntm_threats) + l0_pp.forward(ntm_pp)).screlu();
             
             let hidden_layer = stm_hidden.concat(ntm_hidden);
             
@@ -212,10 +310,10 @@ fn main() {
         ViriFilter::Custom(filter::should_keep)
     );
 
-    let make_mapper = |psqt: ChessBucketsMirrored, threats: ThreatInputs, output_buckets: MaterialCount<NUM_OUTPUT_BUCKETS>| {
+    let make_mapper = |psqt: ChessBucketsMirrored, threats: ThreatInputs, pp: PawnPawnInputs, output_buckets: MaterialCount<NUM_OUTPUT_BUCKETS>| {
         ModelInputsMapper::build(
             &model_inputs,
-            move |pos, step, (((((stm_threats, ntm_threats), stm_psqt), ntm_psqt), buckets), target)| {
+            move |pos, step, (((((((stm_threats, ntm_threats), stm_pp), ntm_pp), stm_psqt), ntm_psqt), buckets), target)| {
                 let mut cnt = 0;
                 psqt.map_features(pos, |stm, ntm| {
                     stm_psqt[cnt] = stm.try_into().unwrap();
@@ -229,7 +327,15 @@ fn main() {
 
                 let mut stm_cnt = 0;
                 let mut ntm_cnt = 0;
+                
+                let bbs = build_bbs(pos);
+                let mut stm_pp_cnt = 0;
+                let mut ntm_pp_cnt = 0;
+                pp.map_features(pos, bbs, |idx| { stm_pp[stm_pp_cnt] = idx.try_into().unwrap(); stm_pp_cnt += 1; }, |idx| { ntm_pp[ntm_pp_cnt] = idx.try_into().unwrap(); ntm_pp_cnt += 1; });
+                if stm_pp_cnt < pp.max_active() { stm_pp[stm_pp_cnt] = -1; }
+                if ntm_pp_cnt < pp.max_active() { ntm_pp[ntm_pp_cnt] = -1; }
                 threats.map_features(
+
                     pos,
                     |stm| {
                         stm_threats[stm_cnt] = stm.try_into().unwrap();
@@ -259,8 +365,8 @@ fn main() {
         )
     };
 
-    let mapper = make_mapper(psqt, threats.clone(), output_buckets);
-    let eval_mapper = make_mapper(psqt, threats, output_buckets);
+    let mapper = make_mapper(psqt, threats.clone(), pp.clone(), output_buckets);
+    let eval_mapper = make_mapper(psqt, threats, pp, output_buckets);
 
     let net_id = "potential-ti-384hl-ml";
 
@@ -366,6 +472,9 @@ fn main() {
         println!("EVAL: {}", SCALE * value);
     }
 }
+
+
+
 
 
 
