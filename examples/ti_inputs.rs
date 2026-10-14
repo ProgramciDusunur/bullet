@@ -44,13 +44,13 @@ impl Threats {
             |sq| bishop.attacks[sq] | rook.attacks[sq],
         );
 
-        let mut offsets = [6 * 84; 5]; // Patched to 6 * 84 because pawn targets PAWN, KNIGHT, ROOK (3 pieces * 2 colors = 6 targets)
+        let mut offsets = [4 * 84; 5];
         for (i, &cnt) in [10 * knight.count, 8 * bishop.count, 8 * rook.count, 10 * queen.count].iter().enumerate() {
             offsets[i + 1] = offsets[i] + cnt;
         }
 
         Self {
-            pawn_map: make_targets([Piece::PAWN, Piece::KNIGHT, Piece::ROOK]), // PATCHED
+            pawn_map: make_targets([Piece::KNIGHT, Piece::ROOK]),
             non_pk_data: [knight, bishop, rook, queen],
             offsets,
         }
