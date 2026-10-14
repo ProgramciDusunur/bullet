@@ -132,6 +132,7 @@ impl PawnPawnInputs {
     const MAX_PAIRS: usize = 16 * 15 / 2;
 
     pub fn new(masks: [u64; 64]) -> Self { Self { masks } }
+    #[allow(dead_code)]
     pub fn num_inputs(&self) -> usize { Self::TOTAL_PAIRS }
     pub fn max_active(&self) -> usize { Self::MAX_PAIRS }
 
@@ -222,7 +223,7 @@ fn main() {
         |builder, (((((((stm_threats, ntm_threats), stm_pp), ntm_pp), stm_psqt), ntm_psqt), output_buckets), target)| {
             let mut l0_psqt = builder.new_weights("l0/psqt", (L1_SIZE, psqt.num_inputs()), InitSettings::Normal { mean: 0.0, stdev: (2f32 / 32.0).sqrt() });
             let l0_threats = builder.new_affine("l0/threats", threats.num_inputs(), L1_SIZE);
-            let l0_pp = builder.new_affine("l0/pp", PawnPawnInputs::TOTAL_PAIRS, L1_SIZE);
+            let l0_pp = builder.new_weights("l0/pp", (L1_SIZE, PawnPawnInputs::TOTAL_PAIRS), InitSettings::Normal { mean: 0.0, stdev: (2f32 / PawnPawnInputs::MAX_PAIRS as f32).sqrt() });
 
             let l0f = builder.new_weights("l0/fac", (L1_SIZE, 768), InitSettings::Zeroed);
             l0_psqt = l0_psqt + l0f.repeat(NUM_INPUT_BUCKETS);
@@ -231,8 +232,8 @@ fn main() {
             let l2 = builder.new_affine("l2", L2_SIZE, NUM_OUTPUT_BUCKETS * L3_SIZE);
             let l3 = builder.new_affine("l3", L3_SIZE, NUM_OUTPUT_BUCKETS);
 
-            let stm_hidden = (l0_psqt.matmul(stm_psqt) + l0_threats.forward(stm_threats) + l0_pp.forward(stm_pp)).screlu();
-            let ntm_hidden = (l0_psqt.matmul(ntm_psqt) + l0_threats.forward(ntm_threats) + l0_pp.forward(ntm_pp)).screlu();
+            let stm_hidden = (l0_threats.forward(stm_threats) + l0_psqt.matmul(stm_psqt) + l0_pp.matmul(stm_pp)).screlu();
+            let ntm_hidden = (l0_threats.forward(ntm_threats) + l0_psqt.matmul(ntm_psqt) + l0_pp.matmul(ntm_pp)).screlu();
             
             let hidden_layer = stm_hidden.concat(ntm_hidden);
             
@@ -262,6 +263,7 @@ fn main() {
             .quantise::<i16>(Q0),
         SavedFormat::id("l0/threatsw").round().quantise::<i16>(Q0),
         SavedFormat::id("l0/threatsb").round().quantise::<i16>(Q0),
+        SavedFormat::id("l0/pp").round().quantise::<i16>(Q0),
         SavedFormat::id("l1w")
             .transform(|_, values| {
                 values.iter().map(|f| f / (FT_SHIFT_SCALE * FT_SHIFT_SCALE)).collect()
@@ -279,6 +281,7 @@ fn main() {
     optimiser.set_params_for_weight("l0/psqt", l0_clip);
     optimiser.set_params_for_weight("l0/fac", l0_clip);
     optimiser.set_params_for_weight("l0/threatsw", l0_clip);
+    optimiser.set_params_for_weight("l0/pp", l0_clip);
 
     let l1_clip = AdamWParams { max_weight: L1_RANGE, min_weight: -L1_RANGE, ..Default::default() };
     optimiser.set_params_for_weight("l1w", l1_clip);
