@@ -86,8 +86,8 @@ impl<G: Gpu, S: OptimiserState<G>> TensorParallel<G, S> {
         devices: &[Arc<Device<G>>],
         params: S::Params,
     ) -> Result<Self, G::Error> {
-        if devices.len() != 2 {
-            return Err("Tensor parallelism needs exactly 2 devices!".to_string().into());
+        if devices.len() < 2 {
+            return Err("Tensor parallelism needs at least 2 devices!".to_string().into());
         }
 
         check_devices(devices)?;
