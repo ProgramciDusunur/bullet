@@ -1,4 +1,5 @@
 pub mod autograd;
+mod boundary;
 mod constant;
 mod index;
 mod linear;
@@ -7,6 +8,7 @@ mod subgraph;
 
 use std::{any::Any, collections::BTreeSet, fmt::Debug, rc::Rc};
 
+pub use boundary::Boundary;
 pub use constant::{Constant, ScalarConstant};
 pub use index::{
     broadcast::BroadcastAcrossDimension,

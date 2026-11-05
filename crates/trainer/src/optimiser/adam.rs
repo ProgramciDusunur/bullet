@@ -164,4 +164,8 @@ impl<G: Gpu> OptimiserState<G> for AdamW<G> {
         self.op = params.build(size, device.props()).unwrap().compile(device)?;
         Ok(())
     }
+
+    fn is_elementwise(&self) -> bool {
+        true
+    }
 }

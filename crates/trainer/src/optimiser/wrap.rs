@@ -43,6 +43,10 @@ where
         self.optimiser.set_params(params.into())
     }
 
+    fn is_elementwise(&self) -> bool {
+        self.optimiser.is_elementwise()
+    }
+
     fn load_from_checkpoint(map: &mut BTreeMap<String, &mut Self>, path: &str) -> Result<(), G::Error> {
         let mut map = map.iter_mut().map(|(id, single)| (id.clone(), &mut single.optimiser)).collect();
         O::load_from_checkpoint(&mut map, path)

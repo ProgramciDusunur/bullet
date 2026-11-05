@@ -135,6 +135,10 @@ impl<G: Gpu, S: OptimiserState<G>> OptimiserState<G> for RangerLookahead<G, S> {
         Ok(())
     }
 
+    fn is_elementwise(&self) -> bool {
+        self.inner.is_elementwise()
+    }
+
     fn load_from_checkpoint(map: &mut BTreeMap<String, &mut Self>, path: &str) -> Result<(), G::Error> {
         let slow_params = utils::load_weights_from_file(&format!("{path}/slow.bin"));
 

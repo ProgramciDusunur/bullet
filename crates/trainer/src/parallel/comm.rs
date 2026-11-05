@@ -101,6 +101,16 @@ impl<G: Gpu> Comm<G> {
         self.run(&Plan::broadcast(self.devices.len(), root, &sizes), streams, bufs)
     }
 
+    pub fn wait_for(&self, streams: &[Arc<Stream<G>>]) -> Result<(), G::Error> {
+        for stream in streams {
+            for event in &self.events {
+                stream.wait(event)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn buffer<'a>(
         &'a self,
         rank: usize,

@@ -224,4 +224,8 @@ impl<G: Gpu> OptimiserState<G> for RAdam<G> {
         self.op = params.build(size, device.props()).unwrap().compile(device)?;
         Ok(())
     }
+
+    fn is_elementwise(&self) -> bool {
+        true
+    }
 }
