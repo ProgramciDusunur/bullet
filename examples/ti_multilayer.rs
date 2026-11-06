@@ -147,11 +147,15 @@ fn main() {
         },
     );
 
-    let device = DefaultDevice::new(0).unwrap();
+    let num_devices = DefaultDevice::count().unwrap();
+    println!("Detected {num_devices} device(s)");
+    let devices: Vec<_> = (0..num_devices).map(|id| DefaultDevice::new(id as i32).unwrap()).collect();
+    let device = devices[0].clone();
+
     let weights = ModelWeights::new(&defn, 12412421);
     let params = AdamWParams::default();
     let mut evaluator = ModelEvaluator::new(&defn, device.clone()).unwrap();
-    let mut optimiser = Optimiser::<_, AdamW<_>>::new(defn, weights, device.clone(), params).unwrap();
+    let mut optimiser = Optimiser::<_, AdamW<_>>::with_devices(defn, weights, &devices, params).unwrap();
 
     let saved_format = vec![
         SavedFormat::id("l0/psqt")
