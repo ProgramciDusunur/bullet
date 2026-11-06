@@ -1,11 +1,12 @@
 //! Simple GPU buffer, managed by a guard and a stream-syncing wrapper
 
 use std::{
+    ffi::c_void,
     ops::Deref,
     sync::{Arc, Mutex},
 };
 
-use bullet_compiler::tensor::{DType, TValue};
+use bullet_compiler::tensor::{DType, TValue, bf16, f16};
 
 use crate::runtime::{Device, Gpu, Stream};
 
@@ -30,8 +31,10 @@ impl<G: Gpu> SyncOnDrop<G> {
         Self { stream, guards: Vec::new(), synced: false }
     }
 
-    pub fn sync(self) -> Result<(), G::Error> {
-        self.stream.sync()
+    pub fn sync(mut self) -> Result<(), G::Error> {
+        self.stream.sync()?;
+        self.synced = true;
+        Ok(())
     }
 
     pub fn stream(&self) -> Arc<Stream<G>> {
@@ -50,6 +53,15 @@ impl<G: Gpu> SyncOnDrop<G> {
         self.guards.push(guard);
 
         Ok(())
+    }
+
+    /// ### Safety
+    ///
+    /// User must ensure that any later work touching the attached buffers on a different stream is
+    /// ordered after the work queued so far on this stream (e.g. via `Stream::record` and `Stream::wait`),
+    /// and that any host memory used by that work outlives it
+    pub unsafe fn release(mut self) {
+        self.synced = true;
     }
 }
 
@@ -107,6 +119,13 @@ impl<G: Gpu, T> SyncOnValue<G, T> {
     pub fn attach_value<U>(self, other: U) -> SyncOnValue<G, (T, U)> {
         SyncOnValue { sync: self.sync, value: (self.value, other) }
     }
+
+    /// ### Safety
+    ///
+    /// As `SyncOnDrop::release`
+    pub unsafe fn release(self) {
+        unsafe { self.sync.release() }
+    }
 }
 
 pub struct Buffer<G: Gpu> {
@@ -114,18 +133,13 @@ pub struct Buffer<G: Gpu> {
     dtype: DType,
     size: usize,
     device: Arc<Device<G>>,
-    creator: Option<Arc<Stream<G>>>,
     owner: Mutex<Option<(Arc<Stream<G>>, usize)>>,
 }
 
 impl<G: Gpu> Drop for Buffer<G> {
     fn drop(&mut self) {
         unsafe {
-            if let Some(stream) = &self.creator {
-                stream.free(self.ptr).unwrap();
-            } else {
-                self.device.free(self.ptr).unwrap();
-            }
+            self.device.free(self.ptr).unwrap();
         }
     }
 }
@@ -144,7 +158,7 @@ impl<G: Gpu> Buffer<G> {
 
         let ptr = device.malloc(dtype.bytes() * size)?;
 
-        Ok(Arc::new(Self { ptr, dtype, size, device: device.clone(), creator: None, owner: Mutex::new(None) }))
+        Ok(Arc::new(Self { ptr, dtype, size, device: device.clone(), owner: Mutex::new(None) }))
     }
 
     /// New zeroed buffer on the device with given size and dtype
@@ -183,6 +197,11 @@ impl<G: Gpu> Buffer<G> {
     /// Returns an error if this buffer is already owned by a
     /// different stream
     pub fn acquire(self: &Arc<Self>, stream: Arc<Stream<G>>) -> Result<BufferGuard<G>, G::Error> {
+        self.device.check_same(&stream.device(), "stream")?;
+        unsafe { self.acquire_unchecked(stream) }
+    }
+
+    unsafe fn acquire_unchecked(self: &Arc<Self>, stream: Arc<Stream<G>>) -> Result<BufferGuard<G>, G::Error> {
         let mut owner = self.owner.lock().unwrap();
 
         if let Some((owning, count)) = owner.as_mut() {
@@ -270,6 +289,257 @@ impl<G: Gpu> Buffer<G> {
 
         unsafe { self.device.memcpy_h2d(value.ptr(), self.ptr, self.bytes()) }
     }
+
+    /// Create buffer from pinned host values on the given device
+    pub fn from_pinned(device: &Arc<Device<G>>, value: &PinnedBuffer<G>) -> Result<Arc<Self>, G::Error> {
+        unsafe {
+            let buf = Self::uninit(device, value.dtype(), value.size())?;
+            device.memcpy_h2d(value.ptr(), buf.ptr, buf.bytes())?;
+            Ok(buf)
+        }
+    }
+
+    /// Queue a copy from pinned host values on the given stream, which
+    /// can overlap with other work queued on the device
+    pub fn copy_from_pinned_async<'a>(
+        self: &Arc<Self>,
+        stream: &Arc<Stream<G>>,
+        value: &'a PinnedBuffer<G>,
+    ) -> Result<SyncOnValue<G, &'a PinnedBuffer<G>>, G::Error> {
+        if self.size() != value.size() {
+            return Err(format!("Mismatched sizes: {} != {}", self.size(), value.size()).into());
+        }
+
+        self.copy_from_pinned_range_async(stream, value, 0, self.size())
+    }
+
+    pub fn copy_from_pinned_range_async<'a>(
+        self: &Arc<Self>,
+        stream: &Arc<Stream<G>>,
+        value: &'a PinnedBuffer<G>,
+        src_start: usize,
+        len: usize,
+    ) -> Result<SyncOnValue<G, &'a PinnedBuffer<G>>, G::Error> {
+        if self.dtype() != value.dtype() {
+            return Err(format!("Mismatched DType: {:?} != {:?}", self.dtype(), value.dtype()).into());
+        }
+
+        if len > self.size() || src_start.checked_add(len).is_none_or(|end| end > value.size()) {
+            return Err("Copy range out of bounds!".to_string().into());
+        }
+
+        if len == 0 {
+            return Err("Attempted 0-size copy!".to_string().into());
+        }
+
+        unsafe {
+            let mut sync = SyncOnDrop::new(stream.clone());
+            let guard = self.clone().acquire(stream.clone())?;
+
+            let src = value.ptr().byte_add(src_start * self.dtype().bytes());
+            stream.memcpy_h2d(src, guard.ptr(), len * self.dtype().bytes())?;
+
+            sync.attach(guard)?;
+            Ok(SyncOnValue::new(sync, value))
+        }
+    }
+
+    pub fn copy_from_async(
+        self: &Arc<Self>,
+        stream: &Arc<Stream<G>>,
+        src: &Arc<Self>,
+    ) -> Result<SyncOnDrop<G>, G::Error> {
+        if self.size() != src.size() {
+            return Err(format!("Mismatched sizes: {} != {}", self.size(), src.size()).into());
+        }
+
+        self.copy_range_from_async(stream, 0, src, 0, self.size())
+    }
+
+    pub fn copy_range_from_async(
+        self: &Arc<Self>,
+        stream: &Arc<Stream<G>>,
+        dst_start: usize,
+        src: &Arc<Self>,
+        src_start: usize,
+        len: usize,
+    ) -> Result<SyncOnDrop<G>, G::Error> {
+        if Arc::ptr_eq(self, src) {
+            return Err("Cannot copy a buffer into itself!".to_string().into());
+        }
+
+        if self.dtype() != src.dtype() {
+            return Err(format!("Mismatched DType: {:?} != {:?}", self.dtype(), src.dtype()).into());
+        }
+
+        if len == 0 {
+            return Err("Attempted 0-size copy!".to_string().into());
+        }
+
+        let in_bounds = |start: usize, size: usize| start.checked_add(len).is_some_and(|end| end <= size);
+        if !in_bounds(dst_start, self.size()) || !in_bounds(src_start, src.size()) {
+            return Err("Copy range out of bounds!".to_string().into());
+        }
+
+        let (s, d, o) = (src.device.ordinal(), self.device.ordinal(), stream.device().ordinal());
+        if o != s && o != d {
+            return Err(format!("Attempted to copy GPU{s} -> GPU{d} on GPU{o} stream!").into());
+        }
+
+        let dst_guard = unsafe { self.acquire_unchecked(stream.clone())? };
+        let src_guard = unsafe { src.acquire_unchecked(stream.clone())? };
+
+        let bytes = self.dtype.bytes();
+        let (dst_offset, src_offset) = (dst_start * bytes, src_start * bytes);
+        let (src_ptr, dst_ptr) = (src_guard.ptr(), dst_guard.ptr());
+
+        unsafe {
+            if s == d {
+                stream.memcpy_d2d(src_ptr, src_offset, dst_ptr, dst_offset, len * bytes)?;
+            } else {
+                stream.memcpy_peer(src_ptr, src_offset, &src.device, dst_ptr, dst_offset, &self.device, len * bytes)?;
+            }
+        }
+
+        let mut sync = SyncOnDrop::new(stream.clone());
+        sync.attach(dst_guard)?;
+        sync.attach(src_guard)?;
+
+        Ok(sync)
+    }
+}
+
+/// Element types that can be stored in a `PinnedBuffer`
+pub trait PinnedElement: Copy + 'static {
+    const DTYPE: DType;
+}
+
+impl PinnedElement for f32 {
+    const DTYPE: DType = DType::F32;
+}
+
+impl PinnedElement for f16 {
+    const DTYPE: DType = DType::F16;
+}
+
+impl PinnedElement for i32 {
+    const DTYPE: DType = DType::I32;
+}
+
+impl PinnedElement for bf16 {
+    const DTYPE: DType = DType::Bf16;
+}
+
+/// Page-locked (pinned) host buffer, which allows copies
+/// between it and the device to be truly asynchronous
+///
+/// The buffer has a fixed `capacity`, but its logical `size`
+/// can be changed freely within that, which makes it
+/// suitable for reuse
+pub struct PinnedBuffer<G: Gpu> {
+    ptr: *mut c_void,
+    dtype: DType,
+    size: usize,
+    capacity: usize,
+    device: Arc<Device<G>>,
+}
+
+// The buffer uniquely owns its allocation, like a `Vec`
+unsafe impl<G: Gpu> Send for PinnedBuffer<G> {}
+unsafe impl<G: Gpu> Sync for PinnedBuffer<G> {}
+
+impl<G: Gpu> Drop for PinnedBuffer<G> {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.free_host(self.ptr, self.dtype.bytes() * self.capacity).unwrap();
+        }
+    }
+}
+
+impl<G: Gpu> PinnedBuffer<G> {
+    /// New zeroed pinned buffer with given dtype, and both size and capacity `capacity`
+    pub fn zeroed(device: &Arc<Device<G>>, dtype: DType, capacity: usize) -> Result<Self, G::Error> {
+        if capacity == 0 {
+            return Err("Attempted to allocated 0-size pinned memory!".to_string().into());
+        }
+
+        let bytes = dtype.bytes() * capacity;
+        let ptr = device.malloc_host(bytes)?;
+
+        unsafe {
+            std::ptr::write_bytes(ptr.cast::<u8>(), 0, bytes);
+        }
+
+        Ok(Self { ptr, dtype, size: capacity, capacity, device: device.clone() })
+    }
+
+    /// New pinned buffer holding a copy of the given host values
+    pub fn from_host(device: &Arc<Device<G>>, value: &TValue) -> Result<Self, G::Error> {
+        let buf = Self::zeroed(device, value.dtype(), value.size())?;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(value.ptr().cast::<u8>(), buf.ptr.cast::<u8>(), buf.bytes());
+        }
+
+        Ok(buf)
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Size of the buffer in raw bytes
+    pub fn bytes(&self) -> usize {
+        self.dtype.bytes() * self.size
+    }
+
+    pub fn device(&self) -> Arc<Device<G>> {
+        self.device.clone()
+    }
+
+    pub fn ptr(&self) -> *const c_void {
+        self.ptr
+    }
+
+    /// Set the logical size of the buffer, which must not exceed its capacity
+    ///
+    /// Memory is always initialised, so any newly exposed
+    /// elements retain whatever values they previously held
+    pub fn set_size(&mut self, size: usize) -> Result<(), G::Error> {
+        if size > self.capacity {
+            return Err(format!("Size {size} exceeds capacity {}!", self.capacity).into());
+        }
+
+        self.size = size;
+        Ok(())
+    }
+
+    pub fn as_slice<T: PinnedElement>(&self) -> Option<&[T]> {
+        (T::DTYPE == self.dtype).then(|| unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.size) })
+    }
+
+    pub fn as_mut_slice<T: PinnedElement>(&mut self) -> Option<&mut [T]> {
+        (T::DTYPE == self.dtype).then(|| unsafe { std::slice::from_raw_parts_mut(self.ptr.cast(), self.size) })
+    }
+
+    /// Copy the contents out into a regular host value
+    pub fn to_host(&self) -> TValue {
+        let mut value = TValue::zeros(self.dtype, self.size);
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.ptr.cast::<u8>(), value.mut_ptr().cast::<u8>(), self.bytes());
+        }
+
+        value
+    }
 }
 
 pub struct BufferGuard<G: Gpu>(Arc<Buffer<G>>);
@@ -322,6 +592,31 @@ mod tests {
         Ok(())
     }
 
+    fn pinned_to_device_async<G: Gpu>() -> Result<(), G::Error> {
+        let host_src = TValue::F32(vec![1.0, 2.0, 3.0, 4.0]);
+
+        let device = Device::<G>::new(0)?;
+        let stream = device.new_stream()?;
+
+        let mut pinned = PinnedBuffer::from_host(&device, &host_src)?;
+        assert_eq!(pinned.to_host(), host_src);
+
+        let buf = Buffer::zeroed(&device, DType::F32, 4)?;
+        buf.copy_from_pinned_async(&stream, &pinned)?.value()?;
+        assert_eq!(buf.to_host()?, host_src);
+
+        pinned.set_size(2)?;
+        assert_eq!(pinned.as_slice::<f32>(), Some(&[1.0, 2.0][..]));
+        assert!(pinned.as_slice::<i32>().is_none());
+        assert!(pinned.set_size(5).is_err());
+
+        let small = Buffer::from_pinned(&device, &pinned)?;
+        assert_eq!(small.to_host()?, TValue::F32(vec![1.0, 2.0]));
+        assert!(buf.copy_from_pinned_async(&stream, &pinned).is_err());
+
+        Ok(())
+    }
+
     #[cfg(feature = "cuda")]
     mod cuda {
         use crate::runtime::cuda::{Cuda, CudaError};
@@ -329,6 +624,11 @@ mod tests {
         #[test]
         fn from_to_host() -> Result<(), CudaError> {
             super::from_to_host::<Cuda>()
+        }
+
+        #[test]
+        fn pinned_to_device_async() -> Result<(), CudaError> {
+            super::pinned_to_device_async::<Cuda>()
         }
     }
 
@@ -340,6 +640,11 @@ mod tests {
         fn from_to_host() -> Result<(), ROCmError> {
             super::from_to_host::<ROCm>()
         }
+
+        #[test]
+        fn pinned_to_device_async() -> Result<(), ROCmError> {
+            super::pinned_to_device_async::<ROCm>()
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -349,6 +654,11 @@ mod tests {
         #[test]
         fn from_to_host() -> Result<(), MetalError> {
             super::from_to_host::<Metal>()
+        }
+
+        #[test]
+        fn pinned_to_device_async() -> Result<(), MetalError> {
+            super::pinned_to_device_async::<Metal>()
         }
     }
 }

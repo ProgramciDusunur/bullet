@@ -22,8 +22,11 @@ use bullet_trainer::{
         adam::{AdamW, AdamWParams},
     },
     reader::ReadMapLoader,
-    run::{DefaultDevice, TrainingSchedule, TrainingSteps, train},
+    run::{DefaultDevice, HostPool, TrainingSchedule, TrainingSteps, train},
 };
+
+// whether to validate the graph after every edit during compilation, can be slow
+const DEBUG: bool = false;
 
 const NET_NAME: &str = "pawnocchio_new_relabeller";
 const READ_BUF_MB: usize = 8192;
@@ -75,7 +78,7 @@ fn main() {
         .add_sparse("buckets", (OUTPUT_BUCKETS, 1), 1)
         .add_dense("targets", (1, 1));
 
-    let defn = ModelDefinition::build(
+    let mut defn = ModelDefinition::build(
         &inputs,
         |builder, (((((stm_pp, ntm_pp), stm_psqt), ntm_psqt), output_buckets), target)| {
             let l0_pp = builder.new_affine("l0/pp/", pp.num_inputs(), L1);
@@ -113,6 +116,8 @@ fn main() {
             (Some(loss.reduce_sum_batch()), vec![("output".to_string(), l3_out)])
         },
     );
+
+    defn.debug = DEBUG;
 
     let weights = ModelWeights::new(&defn, 12412421);
     let device = DefaultDevice::new(0).unwrap();
@@ -169,6 +174,7 @@ fn main() {
                 },
                 lr_schedule,
                 log_rate: 128,
+                track_grad_norms: false,
             },
             ReadMapLoader::new(reader.clone(), mapper, MAP_THREADS),
             |_, _, _| {},
@@ -214,6 +220,7 @@ fn main() {
 
     evaluator.load_device_weights(optimiser.weights()).unwrap();
     let evaluator_mapper = inputs::make_inputs_mapper(params, wdl::ConstantWDL { value: 0.0 });
+    let pool = HostPool::new(device.clone());
 
     for fen in [
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -293,7 +300,7 @@ fn main() {
         "7K/r2R3b/1Q6/8/2q5/1nPB2k1/N3p3/8 w - - 0 1",
     ] {
         let pos = format!("{fen} | 0 | 0.0").parse().unwrap();
-        let inputs = evaluator_mapper.map(&[pos], Default::default(), 1).to_device(&device).unwrap();
+        let inputs = evaluator_mapper.map(&pool, &[pos], Default::default(), 1).unwrap().to_device(&device).unwrap();
         let output = evaluator.evaluate(&inputs).unwrap().get("output").unwrap();
         let [value] = output.to_host().unwrap().f32()[..] else { panic!() };
         println!("FEN: {fen}");

@@ -32,7 +32,7 @@ impl BroadcastAcrossDimension {
 
                 Self { dtype, outer, inner, repeats }
             })
-            .ok_or(format!("Dimension {dim} out of bounds for shape of dimension {shape_dim}!").into())
+            .ok_or_else(|| format!("Dimension {dim} out of bounds for shape of dimension {shape_dim}!").into())
     }
 
     pub fn with_new_dtype(&self, dtype: DType) -> Self {
@@ -107,6 +107,16 @@ impl OpType for BroadcastAcrossDimension {
             DType::I32 => {
                 let TValue::I32(input) = inputs[0] else { panic!() };
                 let TValue::I32(output) = &mut outputs[0] else { panic!() };
+                self.apply(input, output);
+            }
+            DType::F16 => {
+                let TValue::F16(input) = inputs[0] else { panic!() };
+                let TValue::F16(output) = &mut outputs[0] else { panic!() };
+                self.apply(input, output);
+            }
+            DType::Bf16 => {
+                let TValue::Bf16(input) = inputs[0] else { panic!() };
+                let TValue::Bf16(output) = &mut outputs[0] else { panic!() };
                 self.apply(input, output);
             }
         }
