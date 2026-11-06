@@ -27,7 +27,7 @@ use bullet_trainer::{
         adam::{AdamW, AdamWParams},
     },
     reader::ReadMapLoader,
-    run::{DefaultDevice, TrainingSchedule, TrainingSteps, train},
+    run::{DefaultDevice, HostPool, TrainingSchedule, TrainingSteps, train},
 };
 
 const L1_SIZE: usize = 384;
@@ -206,6 +206,7 @@ fn main() {
             warmup_batches: 800,
         }.boxed(),
         log_rate: 128,
+        track_grad_norms: false,
     };
 
     let reader = ViriBinpackLoader::new(
@@ -283,6 +284,7 @@ fn main() {
     ).unwrap();
 
     evaluator.load_device_weights(optimiser.weights()).unwrap();
+    let pool = HostPool::new(device.clone());
 
     for fen in [
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -362,7 +364,7 @@ fn main() {
         "7K/r2R3b/1Q6/8/2q5/1nPB2k1/N3p3/8 w - - 0 1",
     ] {
         let pos = format!("{fen} | 0 | 0.0").parse().unwrap();
-        let inputs = eval_mapper.map(&[pos], Default::default(), 1).to_device(&device).unwrap();
+        let inputs = eval_mapper.map(&pool, &[pos], Default::default(), 1).unwrap().to_device(&device).unwrap();
         let output = evaluator.evaluate(&inputs).unwrap().get("output").unwrap();
         let [value] = output.to_host().unwrap().f32()[..] else { panic!() };
         println!("FEN: {fen}");
