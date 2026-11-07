@@ -8,7 +8,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug)]
-pub struct Slice(MType, usize, usize, bool);
+pub struct Slice(pub(crate) MType, pub(crate) usize, pub(crate) usize, pub(crate) bool);
 
 impl Slice {
     pub fn new(ty: MType, start: usize, end: usize, across_rows: bool) -> Self {

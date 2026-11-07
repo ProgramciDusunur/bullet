@@ -22,7 +22,7 @@ use bullet_gpu::{
 
 use crate::{
     model::{ModelDefinition, ModelWeights, TensorMap},
-    parallel::{DataParallel, StepOutput},
+    parallel::{DataParallel, Executor, StepOutput, TensorParallel},
     run::{PreparedBatchHost, TrainingError},
 };
 
@@ -87,10 +87,21 @@ pub trait OptimiserState<G: Gpu>: Sized {
     fn write_to_checkpoint(map: &BTreeMap<String, &Self>, path: &str) -> Result<(), G::Error>;
 
     fn set_params(&mut self, params: Self::Params) -> Result<(), G::Error>;
+
+    fn is_elementwise(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum Parallelism {
+    Data,
+    Tensor,
 }
 
 pub struct Optimiser<G: Gpu, S: OptimiserState<G>> {
-    parallel: DataParallel<G, S>,
+    parallel: Executor<G, S>,
     pre_update: Vec<Box<dyn AdditionalUpdate<G>>>,
     post_update: Vec<Box<dyn AdditionalUpdate<G>>>,
     cpu_weights: RwLock<ModelWeights>,
@@ -117,8 +128,25 @@ impl<G: Gpu, S: OptimiserState<G>> Optimiser<G, S> {
         devices: &[Arc<Device<G>>],
         params: S::Params,
     ) -> Result<Self, G::Error> {
+        Self::with_parallelism(definition, weights, devices, Parallelism::Data, params)
+    }
+
+    pub fn with_parallelism(
+        definition: ModelDefinition,
+        weights: ModelWeights,
+        devices: &[Arc<Device<G>>],
+        parallelism: Parallelism,
+        params: S::Params,
+    ) -> Result<Self, G::Error> {
+        let parallel = match parallelism {
+            Parallelism::Data => Executor::Data(Box::new(DataParallel::new(&definition, &weights, devices, params)?)),
+            Parallelism::Tensor => {
+                Executor::Tensor(Box::new(TensorParallel::new(&definition, &weights, devices, params)?))
+            }
+        };
+
         Ok(Self {
-            parallel: DataParallel::new(&definition, &weights, devices, params)?,
+            parallel,
             pre_update: Vec::new(),
             post_update: Vec::new(),
             cpu_weights: RwLock::new(weights),

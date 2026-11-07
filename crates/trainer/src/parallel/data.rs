@@ -43,20 +43,20 @@ pub struct DataParallel<G: Gpu, S: OptimiserState<G>> {
     run: Option<RunState<G>>,
 }
 
-struct Replica<G: Gpu, S> {
-    device: Arc<Device<G>>,
-    compute: Arc<Stream<G>>,
-    copy: Arc<Stream<G>>,
-    weights: TensorMap<G>,
-    state: BTreeMap<String, S>,
+pub struct Replica<G: Gpu, S> {
+    pub device: Arc<Device<G>>,
+    pub compute: Arc<Stream<G>>,
+    pub copy: Arc<Stream<G>>,
+    pub weights: TensorMap<G>,
+    pub state: BTreeMap<String, S>,
 }
 
-struct Bound<G: Gpu> {
-    tensors: BTreeMap<NodeId, Arc<Buffer<G>>>,
-    grads: TensorMap<G>,
-    batch: TensorMap<G>,
-    next: TensorMap<G>,
-    loss: Arc<Buffer<G>>,
+pub struct Bound<G: Gpu> {
+    pub tensors: BTreeMap<NodeId, Arc<Buffer<G>>>,
+    pub grads: TensorMap<G>,
+    pub batch: TensorMap<G>,
+    pub next: TensorMap<G>,
+    pub loss: Arc<Buffer<G>>,
     inputs: Vec<RankInput>,
     csr: BTreeMap<String, Csr<G>>,
     host_batch: usize,
@@ -68,7 +68,7 @@ struct Csr<G: Gpu> {
     expand: CompiledKernel<G>,
 }
 
-struct Upload<'a, G: Gpu> {
+pub struct Upload<'a, G: Gpu> {
     copies: Vec<SyncOnValue<G, &'a PinnedBuffer<G>>>,
     expands: Vec<SyncOnValue<G, &'a CompiledKernel<G>>>,
 }
@@ -419,7 +419,7 @@ impl<G: Gpu> RankRun<G> {
 }
 
 impl<G: Gpu, S: OptimiserState<G>> Replica<G, S> {
-    fn new(device: &Arc<Device<G>>, weights: TensorMap<G>, params: S::Params) -> Result<Self, G::Error> {
+    pub fn new(device: &Arc<Device<G>>, weights: TensorMap<G>, params: S::Params) -> Result<Self, G::Error> {
         let state =
             weights.iter().map(|(id, value)| S::new(device, value.size(), params.clone()).map(|s| (id.clone(), s)));
         let state = state.collect::<Result<_, _>>()?;
@@ -430,7 +430,7 @@ impl<G: Gpu, S: OptimiserState<G>> Replica<G, S> {
 }
 
 impl<G: Gpu> Bound<G> {
-    fn new(
+    pub fn new(
         defn: &ModelDefinition,
         lowered: &ModelFunctionDefinition,
         gmap: &BTreeMap<NodeId, NodeId>,
@@ -484,7 +484,7 @@ impl<G: Gpu> Bound<G> {
         Ok(Self { tensors, grads, batch, next, loss, inputs, csr, host_batch })
     }
 
-    fn upload<'a>(
+    pub fn upload<'a>(
         &'a self,
         stream: &Arc<Stream<G>>,
         host: &'a PreparedBatchHost<G>,
@@ -493,7 +493,7 @@ impl<G: Gpu> Bound<G> {
         self.upload_into(&self.batch, stream, host, start)
     }
 
-    fn upload_next<'a>(
+    pub fn upload_next<'a>(
         &'a self,
         stream: &Arc<Stream<G>>,
         host: &'a PreparedBatchHost<G>,
@@ -572,12 +572,12 @@ impl<G: Gpu> Default for Upload<'_, G> {
 }
 
 impl<G: Gpu> Upload<'_, G> {
-    fn extend(&mut self, other: Self) {
+    pub fn extend(&mut self, other: Self) {
         self.copies.extend(other.copies);
         self.expands.extend(other.expands);
     }
 
-    fn sync(self) -> Result<(), G::Error> {
+    pub fn sync(self) -> Result<(), G::Error> {
         sync_all(self.expands).and(sync_all(self.copies))
     }
 }
@@ -598,7 +598,7 @@ fn build_expand(rows: usize, nnz: usize, props: &DeviceProps) -> Result<KernelSr
     unsafe { builder.inner().lower("expand_sparse".to_string(), props) }
 }
 
-fn swap_batches<'a, G: Gpu>(bounds: impl Iterator<Item = &'a mut Bound<G>>) {
+pub fn swap_batches<'a, G: Gpu>(bounds: impl Iterator<Item = &'a mut Bound<G>>) {
     for bound in bounds {
         mem::swap(&mut bound.batch, &mut bound.next);
 
@@ -608,7 +608,7 @@ fn swap_batches<'a, G: Gpu>(bounds: impl Iterator<Item = &'a mut Bound<G>>) {
     }
 }
 
-fn compile<G: Gpu>(device: &Arc<Device<G>>, ir: TensorIR) -> Result<Function<G>, TrainingError<G>> {
+pub fn compile<G: Gpu>(device: &Arc<Device<G>>, ir: TensorIR) -> Result<Function<G>, TrainingError<G>> {
     let mut func = Function::new(device.clone(), ir).map_err(TrainingError::CompilingBackwards)?;
     func.prealloc().map_err(TrainingError::Unexpected)?;
     Ok(func)
@@ -639,7 +639,7 @@ fn update_replica<'a, G: Gpu, S: OptimiserState<G>>(
     Ok(sync)
 }
 
-fn update_weights<'a, G: Gpu, S: OptimiserState<G>>(
+pub fn update_weights<'a, G: Gpu, S: OptimiserState<G>>(
     state: &'a mut BTreeMap<String, S>,
     weights: &TensorMap<G>,
     stream: &Arc<Stream<G>>,
@@ -714,7 +714,7 @@ fn not_prepared<G: Gpu>() -> TrainingError<G> {
     TrainingError::Unexpected(NOT_PREPARED.to_string().into())
 }
 
-fn check_devices<G: Gpu>(devices: &[Arc<Device<G>>]) -> Result<(), G::Error> {
+pub fn check_devices<G: Gpu>(devices: &[Arc<Device<G>>]) -> Result<(), G::Error> {
     let Some(primary) = devices.first() else {
         return Err("No devices given!".to_string().into());
     };
@@ -731,9 +731,7 @@ fn check_devices<G: Gpu>(devices: &[Arc<Device<G>>]) -> Result<(), G::Error> {
         if kind(device) != kind(primary) {
             let (a, x) = (primary.ordinal(), kind(primary));
             let (b, y) = (device.ordinal(), kind(device));
-            return Err(
-                format!("Data-parallel training needs matching GPUs, but GPU{a} is {x} and GPU{b} is {y}!").into()
-            );
+            return Err(format!("Multi-GPU training needs matching GPUs, but GPU{a} is {x} and GPU{b} is {y}!").into());
         }
     }
 

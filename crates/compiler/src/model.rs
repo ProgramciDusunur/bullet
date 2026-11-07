@@ -1,5 +1,6 @@
 mod builder;
 pub mod operations;
+pub mod split;
 
 use std::{any::Any, collections::BTreeMap, fmt, rc::Rc};
 
@@ -183,7 +184,7 @@ impl ModelIR {
         node
     }
 
-    pub fn add_op(&mut self, inputs: impl AsRef<[NodeId]>, op: impl ModelOperation) -> Result<NodeId, IRError> {
+    pub fn add_op(&mut self, inputs: impl AsRef<[NodeId]>, op: impl Into<ModelOp>) -> Result<NodeId, IRError> {
         self.ir.add_op(inputs, op.into()).map(|x| x[0])
     }
 

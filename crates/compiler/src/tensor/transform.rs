@@ -5,6 +5,7 @@ pub mod foldrules;
 pub mod inline;
 pub mod modify;
 pub mod ordering;
+pub mod partition;
 pub mod rewriterules;
 
 use crate::tensor::{IRTrace, TensorIR};

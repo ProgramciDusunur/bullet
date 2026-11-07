@@ -105,6 +105,17 @@ impl ModelDefinition {
         track_grad_norms: bool,
         record_optimisations: bool,
     ) -> Result<(ModelFunctionDefinition, NodeMap, Option<GradNorms>), IRTrace> {
+        self.lower_backward_with(frozen, batch_size, track_grad_norms, record_optimisations, &[])
+    }
+
+    pub(crate) fn lower_backward_with(
+        &self,
+        frozen: &BTreeSet<NodeId>,
+        batch_size: usize,
+        track_grad_norms: bool,
+        record_optimisations: bool,
+        extra_outputs: &[NodeId],
+    ) -> Result<(ModelFunctionDefinition, NodeMap, Option<GradNorms>), IRTrace> {
         // if track_grad_norms is on,              ^^^^^^^^^^^^^^^^^
         // return a node with that in it,
         // and the associated param group names.
@@ -115,6 +126,10 @@ impl ModelDefinition {
         let loss = self.loss.ok_or("Loss node not defined!")?;
         let loss = *map.get(&loss).unwrap();
         bwd.register_output(loss);
+
+        for extra in extra_outputs {
+            bwd.register_output(map[extra]);
+        }
 
         if record_optimisations {
             bwd.start_recording("Optimise forward pass");
