@@ -101,12 +101,12 @@ fn main() {
     };
 
     let (loader_threads, mapper_threads) = if is_kaggle {
-        (36, 16) 
+        (32, 24) 
     } else {
         (12, 4)
     };
     
-    let buffer_size_mb = if is_kaggle { 16384 } else { 4096 };
+    let buffer_size_mb = if is_kaggle { 49152 } else { 4096 };
 
     let psqt = ChessBucketsMirrored::new(BUCKET_LAYOUT);
     let threats = ThreatInputs::new();
