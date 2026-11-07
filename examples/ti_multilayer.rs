@@ -24,6 +24,7 @@ use bullet_trainer::{
     model::{DenseInput, InitSettings, ModelDefinition, ModelEvaluator, ModelInputs, ModelInputsMapper, ModelWeights, SavedFormat, SparseInput},
     optimiser::{
         Optimiser,
+        Parallelism,
         adam::{AdamW, AdamWParams},
     },
     reader::ReadMapLoader,
@@ -152,10 +153,18 @@ fn main() {
     let devices: Vec<_> = (0..num_devices).map(|id| DefaultDevice::new(id as i32).unwrap()).collect();
     let device = devices[0].clone();
 
+    let parallelism = if devices.len() > 1 {
+        println!("Using Tensor Parallelism across {} devices", devices.len());
+        Parallelism::Tensor
+    } else {
+        println!("Using Single Device / Data Parallelism");
+        Parallelism::Data
+    };
+
     let weights = ModelWeights::new(&defn, 12412421);
     let params = AdamWParams::default();
     let mut evaluator = ModelEvaluator::new(&defn, device.clone()).unwrap();
-    let mut optimiser = Optimiser::<_, AdamW<_>>::with_devices(defn, weights, &devices, params).unwrap();
+    let mut optimiser = Optimiser::<_, AdamW<_>>::with_parallelism(defn, weights, &devices, parallelism, params).unwrap();
 
     let saved_format = vec![
         SavedFormat::id("l0/psqt")
