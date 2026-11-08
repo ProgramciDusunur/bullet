@@ -24,10 +24,11 @@ use bullet_trainer::{
     model::{DenseInput, InitSettings, ModelDefinition, ModelEvaluator, ModelInputs, ModelInputsMapper, ModelWeights, SavedFormat, SparseInput},
     optimiser::{
         Optimiser,
+        Parallelism,
         adam::{AdamW, AdamWParams},
     },
     reader::ReadMapLoader,
-    run::{DefaultDevice, TrainingSchedule, TrainingSteps, train},
+    run::{DefaultDevice, HostPool, TrainingSchedule, TrainingSteps, train},
 };
 
 const L1_SIZE: usize = 384;
@@ -190,18 +191,18 @@ fn main() {
     let is_kaggle = std::path::Path::new("/kaggle").exists();
 
     let data_path = if is_kaggle {
-        "/kaggle/input/datasets/kirill020708/combined-multilayer-60m-games/combined-multilayer-60m-games.vf"
+        "/kaggle/input/datasets/adrianladoni/combined-multilayer-60m-ti-15m-games/combined-multilayer-60m-ti-15m-games.vf"
     } else {
         "../combined-multilayer-45m-games.vf"
     };
 
     let (loader_threads, mapper_threads) = if is_kaggle {
-        (36, 16) 
+        (32, 24) 
     } else {
         (12, 4)
     };
     
-    let buffer_size_mb = if is_kaggle { 16384 } else { 4096 };
+    let buffer_size_mb = if is_kaggle { 49152 } else { 4096 };
 
     let psqt = ChessBucketsMirrored::new(BUCKET_LAYOUT);
     let threats = ThreatInputs::new();
@@ -247,11 +248,23 @@ fn main() {
         },
     );
 
-    let device = DefaultDevice::new(0).unwrap();
+    let num_devices = DefaultDevice::count().unwrap();
+    println!("Detected {num_devices} device(s)");
+    let devices: Vec<_> = (0..num_devices).map(|id| DefaultDevice::new(id as i32).unwrap()).collect();
+    let device = devices[0].clone();
+
+    let parallelism = if devices.len() > 1 {
+        println!("Using Tensor Parallelism across {} devices", devices.len());
+        Parallelism::Tensor
+    } else {
+        println!("Using Single Device / Data Parallelism");
+        Parallelism::Data
+    };
+
     let weights = ModelWeights::new(&defn, 12412421);
     let params = AdamWParams::default();
     let mut evaluator = ModelEvaluator::new(&defn, device.clone()).unwrap();
-    let mut optimiser = Optimiser::<_, AdamW<_>>::new(defn, weights, device.clone(), params).unwrap();
+    let mut optimiser = Optimiser::<_, AdamW<_>>::with_parallelism(defn, weights, &devices, parallelism, params).unwrap();
 
     let saved_format = vec![
         SavedFormat::id("l0/psqt")
@@ -304,6 +317,7 @@ fn main() {
             warmup_batches: 800,
         }.boxed(),
         log_rate: 128,
+        track_grad_norms: false,
     };
 
     let reader = ViriBinpackLoader::new(
@@ -371,7 +385,7 @@ fn main() {
     let mapper = make_mapper(psqt, threats.clone(), pp.clone(), output_buckets);
     let eval_mapper = make_mapper(psqt, threats, pp, output_buckets);
 
-    let net_id = "potential-ti-384hl-ml";
+    let net_id = "potential-ti-pp-384hl-ml";
 
     train(
         &mut optimiser,
@@ -389,6 +403,7 @@ fn main() {
     ).unwrap();
 
     evaluator.load_device_weights(optimiser.weights()).unwrap();
+    let pool = HostPool::new(device.clone());
 
     for fen in [
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -468,7 +483,7 @@ fn main() {
         "7K/r2R3b/1Q6/8/2q5/1nPB2k1/N3p3/8 w - - 0 1",
     ] {
         let pos = format!("{fen} | 0 | 0.0").parse().unwrap();
-        let inputs = eval_mapper.map(&[pos], Default::default(), 1).to_device(&device).unwrap();
+        let inputs = eval_mapper.map(&pool, &[pos], Default::default(), 1).unwrap().to_device(&device).unwrap();
         let output = evaluator.evaluate(&inputs).unwrap().get("output").unwrap();
         let [value] = output.to_host().unwrap().f32()[..] else { panic!() };
         println!("FEN: {fen}");
