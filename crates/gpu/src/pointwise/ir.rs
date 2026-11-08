@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::{self, Write},
 };
 
@@ -15,7 +15,7 @@ use crate::{
     kernel::KernelSrc,
     pointwise::{
         operations::{MemIO, PType, PointwiseOp},
-        write::{code_str, tystr},
+        write::{code_str, half_conversions, tystr},
     },
     runtime::{DeviceProps, Dialect, Dim3},
 };
@@ -59,6 +59,16 @@ impl PointwiseIR {
 
     pub fn tid(&self) -> NodeId {
         self.tid
+    }
+
+    /// Number of threads this kernel is launched with
+    pub fn size(&self) -> Size {
+        self.size
+    }
+
+    /// Type of the given node
+    pub fn ty(&self, node: NodeId) -> Result<PType, IRError> {
+        Ok(self.ir.node(node)?.ty())
     }
 
     pub fn add_buf(&mut self, ty: TType) -> NodeId {
@@ -175,6 +185,14 @@ impl PointwiseIR {
         let PType::Variable { ty, p2size } = self.ir.node(node)?.ty() else {
             return Err("Only variables allowed in unary ops!".into());
         };
+
+        if op.is_integer_half_cast(ty) {
+            return Err("Cannot cast between integer and half precision types!".into());
+        }
+
+        if op.dtype(ty).is_none() {
+            return Err("Unary op failed type check!".into());
+        }
 
         self.ir.add_op([node], PointwiseOp::Unary { ty, p2size, op }).map(|x| x[0])
     }
@@ -296,28 +314,29 @@ impl PointwiseIR {
     }
 
     pub fn eliminate_common_subexprs(&mut self) -> Result<(), IRTrace> {
-        while self.eliminate_single_common_subexpr()? {}
-        Ok(())
-    }
+        let mut seen: BTreeMap<Vec<NodeId>, Vec<(PointwiseOp, Vec<NodeId>)>> = BTreeMap::new();
 
-    fn eliminate_single_common_subexpr(&mut self) -> Result<bool, IRTrace> {
-        let ops = self.ir.operations().cloned();
+        for id in self.ir.topo_order_ops()? {
+            let op = self.ir.op(id)?.clone();
 
-        for (i, op_i) in ops.clone().enumerate() {
-            for op_j in ops.clone().skip(i + 1) {
-                if op_i.inputs() == op_j.inputs() && op_i.data() == op_j.data() && !op_i.data().is_unique() {
-                    for (&out_i, &out_j) in op_i.outputs().iter().zip(op_j.outputs()) {
-                        self.ir.replace_input_no_cycle_check(out_i, out_j)?;
-                    }
+            if op.data().is_unique() {
+                continue;
+            }
 
-                    self.ir.remove_op(op_j.id())?;
+            let bucket = seen.entry(op.inputs().to_vec()).or_default();
 
-                    return Ok(true);
+            if let Some((_, outs)) = bucket.iter().find(|(data, _)| data == op.data()) {
+                for (&keep, &dup) in outs.iter().zip(op.outputs()) {
+                    self.ir.replace_input_no_cycle_check(keep, dup)?;
                 }
+
+                self.ir.remove_op(id)?;
+            } else {
+                bucket.push((*op.data(), op.outputs().to_vec()));
             }
         }
 
-        Ok(false)
+        Ok(())
     }
 
     pub fn source_code(&self, kernel_name: &str, props: &DeviceProps) -> Result<String, fmt::Error> {
@@ -346,8 +365,19 @@ impl PointwiseIR {
 
         let mut src = String::new();
 
+        let uses_half = self.ir.operations().any(|op| match *op.data() {
+            PointwiseOp::Unary { ty, op: Unary::Cast(cast), .. } => {
+                [ty, cast].iter().any(|t| matches!(t, DType::F16 | DType::Bf16))
+            }
+            _ => false,
+        });
+
         match props.dialect() {
             Dialect::CudaHip => {
+                if uses_half {
+                    writeln!(&mut src, "{}", half_conversions(props))?;
+                }
+
                 write!(&mut src, "extern \"C\" __global__ void {kernel_name}(")?;
 
                 for (i, &input) in self.bufs.iter().enumerate() {
@@ -360,6 +390,10 @@ impl PointwiseIR {
                 writeln!(&mut src, "#include <metal_stdlib>")?;
                 writeln!(&mut src, "using namespace metal;")?;
                 writeln!(&mut src)?;
+
+                if uses_half {
+                    writeln!(&mut src, "{}", half_conversions(props))?;
+                }
 
                 write!(&mut src, "kernel void {kernel_name}(")?;
 

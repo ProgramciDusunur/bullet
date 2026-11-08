@@ -133,14 +133,6 @@ impl ModelBuilder {
         let bias = self.new_weights(format!("{}b", id.as_ref()), (output_size, bias_cols), InitSettings::Zeroed);
         Affine { weights, bias }
     }
-
-    pub fn with_no_grad<T>(&self, mut f: impl FnMut() -> T) -> T {
-        let value = self.ir().stop_grad;
-        self.ir().stop_grad = true;
-        let out = f();
-        self.ir().stop_grad = value;
-        out
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -255,7 +247,9 @@ impl<'a> ModelNode<'a> {
         let ty = self.ty();
         let value = match value.into() {
             DValue::F32(val) => TValue::F32(vec![val; ty.single_size()]),
+            DValue::F16(val) => TValue::F16(vec![val; ty.single_size()]),
             DValue::I32(val) => TValue::I32(vec![val; ty.single_size()]),
+            DValue::Bf16(val) => TValue::Bf16(vec![val; ty.single_size()]),
         };
         let node = self.builder.add_op([], Constant::new(value, ty.rows, ty.cols));
         let scalar = ModelNode { node, ..self };
@@ -335,6 +329,10 @@ impl<'a> ModelNode<'a> {
     }
 
     pub fn matmul(self, other: Self) -> Self {
+        self.gemm(false, other, false)
+    }
+
+    pub fn gemm(self, ltrans: bool, other: Self, rtrans: bool) -> Self {
         let lty = self.ty();
         let rty = other.ty();
 
@@ -344,16 +342,23 @@ impl<'a> ModelNode<'a> {
         };
 
         let rdtype = match rty.layout {
-            Layout::Sparse(_) => return self.sparse_matmul(other),
+            Layout::Sparse(_) => {
+                if ltrans || rtrans {
+                    unimplemented!("Transposed SpMM!");
+                }
+                return self.sparse_matmul(other);
+            }
             Layout::Dense(dtype) => dtype,
         };
 
-        if ldtype != rdtype || lty.cols != rty.rows {
+        let (m, n) = if ltrans { (lty.cols, lty.rows) } else { (lty.rows, lty.cols) };
+        let (rn, k) = if rtrans { (rty.cols, rty.rows) } else { (rty.rows, rty.cols) };
+
+        if ldtype != rdtype || n != rn {
             panic!("Matmul: {lty} @ {rty} is not possible!");
         }
 
-        let matmul =
-            Matmul { lbatch: lty.batch, rbatch: rty.batch, m: lty.rows, n: lty.cols, k: rty.cols, dtype: ldtype };
+        let matmul = Matmul { lbatch: lty.batch, rbatch: rty.batch, ltrans, rtrans, m, n, k, dtype: ldtype };
         Self { node: self.builder.add_op([self, other], matmul), ..self }
     }
 

@@ -1,9 +1,12 @@
 use std::{env, path::PathBuf};
 
 fn get_var_path(name: &str) -> PathBuf {
-    println!("rerun-if-env-changed={name}");
+    println!("cargo:rerun-if-env-changed={name}");
 
     let path = env::var(name).unwrap_or_else(|e| match e {
+        env::VarError::NotPresent if name == "CUDA_PATH" && PathBuf::from("/usr/local/cuda").exists() => {
+            "/usr/local/cuda".to_string()
+        }
         env::VarError::NotPresent => panic!("{name} is not defined"),
         env::VarError::NotUnicode(_) => panic!("{name} contains non-unicode path!"),
     });

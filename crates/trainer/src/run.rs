@@ -1,21 +1,16 @@
 mod dataloader;
+pub mod events;
 pub mod logger;
 mod schedule;
 
 pub use dataloader::{DataLoader, DataLoadingError, HostPool, PreparedBatchHost};
+pub use events::TrainingEvent;
 pub use schedule::{Step, TrainingSchedule, TrainingSteps};
 
-use std::{collections::BTreeMap, sync::mpsc, thread, time::Instant};
+use std::{sync::mpsc, thread, time::Instant};
 
-use bullet_compiler::{
-    model::Layout,
-    tensor::{IRTrace, TValue},
-};
-use bullet_gpu::{
-    buffer::{Buffer, SyncOnValue},
-    function::Function,
-    runtime::{self, Device, Gpu},
-};
+use bullet_compiler::{model::Layout, tensor::IRTrace};
+use bullet_gpu::runtime::{self, Device, Gpu};
 
 use crate::optimiser::{Optimiser, OptimiserState};
 
@@ -36,6 +31,8 @@ pub enum TrainingError<G: Gpu> {
     Unexpected(G::Error),
     CompilingBackwards(IRTrace),
     IoError,
+    InvalidSchedule,
+    MoreDevicesThanBatchSize,
 }
 
 impl<G: Gpu> From<DataLoadingError> for TrainingError<G> {
@@ -54,7 +51,11 @@ pub fn measure_max_cpu_throughput(dataloader: impl DataLoader, steps: TrainingSt
     let mut sb_timer = Instant::now();
     let mut step = Step::from(steps);
 
-    dataloader.map_batches(step, steps.batch_size, |_| {
+    // Batches are never sent to a device, so there is no need for real pinned memory
+    let device = Device::<runtime::mock::MockGpu>::new(0).map_err(DataLoadingError::Message)?;
+    let pool = HostPool::new(device);
+
+    dataloader.map_batches(&pool, step, steps.batch_size, |_| {
         if step.batch() == steps.batches_per_superbatch - 1 {
             let sb = step.superbatch();
             let total_time = timer.elapsed().as_secs_f32();
@@ -76,92 +77,108 @@ pub fn train<G: Gpu, O: OptimiserState<G>>(
     optimiser: &mut Optimiser<G, O>,
     schedule: TrainingSchedule,
     dataloader: impl DataLoader,
+    batch_callback: impl FnMut(&mut Optimiser<G, O>, Step, f32),
+    superbatch_callback: impl FnMut(&mut Optimiser<G, O>, Step),
+) -> Result<(), TrainingError<G>> {
+    let mut console = logger::ConsoleObserver::new(schedule.steps, schedule.log_rate);
+
+    train_with_observer(optimiser, schedule, dataloader, batch_callback, superbatch_callback, &mut |event| {
+        console.on_event(event);
+    })
+}
+
+pub fn train_with_observer<G: Gpu, O: OptimiserState<G>>(
+    optimiser: &mut Optimiser<G, O>,
+    schedule: TrainingSchedule,
+    dataloader: impl DataLoader,
     mut batch_callback: impl FnMut(&mut Optimiser<G, O>, Step, f32),
     mut superbatch_callback: impl FnMut(&mut Optimiser<G, O>, Step),
+    observer: &mut (impl FnMut(&TrainingEvent) + ?Sized),
 ) -> Result<(), TrainingError<G>> {
     let timer = Instant::now();
-
     let device = optimiser.device();
     let props = device.props();
 
-    logger::clear_colours();
-    println!(
-        "{}",
-        logger::ansi(format!("Training on {} ({})", props.name(), props.arch().unwrap_or("unknown")), "34;1")
-    );
-
     let steps = schedule.steps;
-    let (sender, receiver) = mpsc::sync_channel::<PreparedBatchHost>(32);
-    let dataloader = thread::spawn(move || {
-        let mut step = Step::from(steps);
 
-        dataloader.map_batches(step, steps.batch_size, |batch| {
-            sender.send(batch).unwrap();
-            step.step();
-            step.finished()
-        })
+    if steps.batch_size == 0
+        || steps.batches_per_superbatch == 0
+        || steps.start_superbatch == 0
+        || steps.start_superbatch > steps.end_superbatch
+        || steps.end_superbatch == usize::MAX
+        || steps
+            .end_superbatch
+            .checked_mul(steps.batches_per_superbatch)
+            .and_then(|batches| batches.checked_mul(steps.batch_size))
+            .is_none()
+    {
+        return Err(TrainingError::InvalidSchedule);
+    }
+
+    if steps.batch_size < optimiser.ranks() {
+        return Err(TrainingError::MoreDevicesThanBatchSize);
+    }
+
+    observer(&TrainingEvent::RunStarted {
+        steps,
+        device_name: props.name().to_owned(),
+        device_arch: props.arch().map(str::to_owned),
+        device_count: optimiser.ranks(),
     });
 
-    let defn = optimiser.definition();
-    let (func, gmap) =
-        defn.lower_backward(&Default::default(), steps.batch_size).map_err(TrainingError::CompilingBackwards)?;
-    let map = func.map();
-    let mut backwards = Function::new(device.clone(), func.ir().clone()).map_err(TrainingError::CompilingBackwards)?;
-    backwards.prealloc().map_err(TrainingError::Unexpected)?;
+    let (sender, receiver) = mpsc::sync_channel::<PreparedBatchHost<G>>(32);
 
-    let mut tensor_map = BTreeMap::new();
+    let ir = optimiser.definition().ir();
+    let sparse = ir.inputs().iter().filter_map(|(id, name)| match ir.node(*id).ty().layout() {
+        Layout::Sparse(nnz) => Some((name.clone(), nnz)),
+        Layout::Dense(_) => None,
+    });
+    let sparse = sparse.collect::<Vec<_>>();
+    let threads = thread::available_parallelism().map_or(1, usize::from).min(16);
 
-    let mut gradients = BTreeMap::new();
-    for (mid, (name, _)) in defn.ir().weights() {
-        let tid = *map.get(mid).unwrap();
-        let gid = *gmap.get(mid).unwrap();
+    let pool = HostPool::new(device.clone());
+    let dataloader = thread::spawn(move || {
+        let mut step = Step::from(steps);
+        let mut error = None;
 
-        let ty = defn.ir().node(*mid).ty();
-        let Layout::Dense(dtype) = ty.layout() else { unreachable!() };
-        let size = ty.shape().size();
-        let grad = Buffer::zeroed(&device, dtype, size).map_err(TrainingError::Unexpected)?;
+        let result = dataloader.map_batches(&pool, step, steps.batch_size, |mut batch| {
+            if let Err(e) = batch.compact(&sparse, threads) {
+                error = Some(DataLoadingError::Message(format!("{e:?}")));
+                return true;
+            }
 
-        tensor_map.insert(tid, optimiser.weights().get(name).unwrap().clone());
-        tensor_map.insert(gid, grad.clone());
+            if sender.send(batch).is_err() {
+                return true;
+            }
 
-        gradients.insert(name.clone(), grad);
-    }
+            step.step();
+            step.finished()
+        });
 
-    let tgf = TValue::F32(vec![1.0 / steps.batch_size as f32]);
-    let tgf = Buffer::from_host(&device, &tgf).map_err(TrainingError::Unexpected)?;
-    let tlr = Buffer::from_host(&device, &TValue::F32(vec![0.0])).map_err(TrainingError::Unexpected)?;
-    let loss = Buffer::from_host(&device, &TValue::F32(vec![0.0])).map_err(TrainingError::Unexpected)?;
+        error.map_or(result, Err)
+    });
 
-    tensor_map.insert(*map.get(&defn.loss().unwrap()).unwrap(), loss.clone());
+    optimiser.prepare(steps.batch_size, schedule.track_grad_norms)?;
 
-    let first_batch =
-        receiver.recv().map_err(|_| TrainingError::DataLoadingError(DataLoadingError::NoBatchesReceived))?;
-    let mut batch_on_device = first_batch.to_device(&device).map_err(TrainingError::Unexpected)?;
-    let mut next_on_device = batch_on_device
-        .iter()
-        .map(|(id, tensor)| {
-            let buf = Buffer::zeroed(&device, tensor.dtype(), tensor.size());
-            (id.clone(), buf.unwrap())
-        })
-        .collect();
+    let first_batch = match receiver.recv() {
+        Ok(batch) => batch,
+        Err(_) => {
+            dataloader.join().map_err(|_| DataLoadingError::Message("Data loader panicked".into()))??;
 
-    let mut input_names = BTreeMap::new();
-    for (mid, name) in defn.ir().inputs() {
-        let tid = *map.get(mid).unwrap();
+            return Err(DataLoadingError::NoBatchesReceived.into());
+        }
+    };
 
-        input_names.insert(tid, name.clone());
-        tensor_map.insert(tid, batch_on_device.get(name).unwrap().clone());
-    }
+    optimiser.load_batch(&first_batch).map_err(TrainingError::Unexpected)?;
+    drop(first_batch);
 
-    let copy_stream = device.new_stream().map_err(TrainingError::Unexpected)?;
-    let compute_stream = device.new_stream().map_err(TrainingError::Unexpected)?;
     let lr = schedule.lr_schedule;
     let mut batch_queued = true;
     let mut step = Step::from(steps);
-    let mut prev_lr = lr(step);
     let mut superbatch_timer = Instant::now();
     let mut running_loss = 0.0;
-    let mut superbatch_positions = 0;
+
+    observer(&TrainingEvent::TrainingReady { setup_time: timer.elapsed() });
 
     while batch_queued {
         if step.finished() {
@@ -169,63 +186,26 @@ pub fn train<G: Gpu, O: OptimiserState<G>>(
         }
 
         let lrate = lr(step);
-        let lrdrop = TValue::F32(vec![lrate]);
-        let lrdrop = tlr.copy_from_host_async(&copy_stream, &lrdrop).map_err(TrainingError::Unexpected)?;
+        let output = optimiser.step(lrate, &mut || receiver.recv().ok())?;
+        batch_queued = output.next_queued;
 
-        if step.batch() == 0 {
-            if lrate < prev_lr {
-                println!("LR dropped to {}", logger::ansi(lrate, logger::num_cs()));
-            } else if lrate > prev_lr {
-                println!("LR increased to {}", logger::ansi(lrate, logger::num_cs()));
-            }
-        }
-
-        prev_lr = lrate;
-
-        let compute_block1 =
-            backwards.execute(compute_stream.clone(), &tensor_map).map_err(TrainingError::GradientCalculationError)?;
-
-        lrdrop.value().map_err(TrainingError::Unexpected)?;
-
-        let compute_block2 = optimiser
-            .update(&compute_stream, tgf.clone(), tlr.clone(), &gradients)
-            .map_err(TrainingError::OptimiserUpdateError)?;
-
-        if let Ok(next_batch_host) = receiver.recv() {
-            drop(
-                next_batch_host
-                    .copy_to_device_async(&copy_stream, &next_on_device)
-                    .map_err(TrainingError::Unexpected)?,
-            );
-            std::mem::swap(&mut batch_on_device, &mut next_on_device);
-
-            for (id, name) in &input_names {
-                *tensor_map.get_mut(id).unwrap() = batch_on_device.get(name).unwrap().clone();
-            }
-        } else {
-            batch_queued = false;
-        }
-
-        let _ = compute_block1.value().map_err(TrainingError::Unexpected)?;
-        compute_block2.sync().map_err(TrainingError::Unexpected)?;
-
-        let TValue::F32(loss) = loss
-            .to_host_async(&copy_stream)
-            .map(SyncOnValue::value)
-            .map_err(TrainingError::Unexpected)?
-            .map_err(TrainingError::Unexpected)?
-        else {
-            panic!()
-        };
-        let [loss] = loss[..] else { panic!() };
-        let error = loss / steps.batch_size as f32;
+        let error = output.loss / steps.batch_size as f32;
 
         running_loss += error;
-        superbatch_positions += steps.batch_size;
 
-        if step.batch().is_multiple_of(schedule.log_rate) {
-            logger::report_superbatch_progress(step, &superbatch_timer, superbatch_positions);
-        }
+        let grad_norm = output.grad_sqnorms.map(|sqnorms| {
+            let norms = sqnorms.into_iter().map(|(name, sq)| (name, sq.sqrt() / steps.batch_size as f32));
+            norms.collect()
+        });
+
+        observer(&TrainingEvent::BatchCompleted {
+            step,
+            loss: error,
+            learning_rate: lrate,
+            elapsed: timer.elapsed(),
+            superbatch_elapsed: superbatch_timer.elapsed(),
+            grad_norm,
+        });
 
         batch_callback(optimiser, step, error);
 
@@ -233,33 +213,30 @@ pub fn train<G: Gpu, O: OptimiserState<G>>(
             let error = running_loss / steps.batches_per_superbatch as f32;
             running_loss = 0.0;
 
-            let total_time = timer.elapsed().as_secs_f32();
-            let sb_time = superbatch_timer.elapsed().as_secs_f32();
-
-            let sb = step.superbatch();
-            logger::report_superbatch_finished(sb, error, sb_time, total_time, superbatch_positions);
-            logger::report_time_left(steps, sb, total_time);
+            observer(&TrainingEvent::SuperbatchCompleted {
+                step,
+                loss: error,
+                elapsed: timer.elapsed(),
+                superbatch_elapsed: superbatch_timer.elapsed(),
+            });
 
             superbatch_callback(optimiser, step);
 
-            superbatch_positions = 0;
             superbatch_timer = Instant::now();
         }
 
         step.step();
     }
 
-    let total_time = timer.elapsed().as_secs();
-    let (hours, minutes, seconds) = logger::seconds_to_hms(total_time as u32);
+    optimiser.finish();
 
-    println!(
-        "Total Training Time: {}h {}m {}s",
-        logger::ansi(hours, logger::num_cs()),
-        logger::ansi(minutes, logger::num_cs()),
-        logger::ansi(seconds, logger::num_cs()),
-    );
+    dataloader.join().map_err(|_| DataLoadingError::Message("Data loader panicked".into()))??;
 
-    dataloader.join().unwrap()?;
+    if !step.finished() {
+        return Err(DataLoadingError::Message("Data loader ended before all scheduled batches completed".into()).into());
+    }
+
+    observer(&TrainingEvent::RunCompleted { elapsed: timer.elapsed() });
 
     Ok(())
 }
