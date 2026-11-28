@@ -1,8 +1,9 @@
+mod builder;
 mod generate;
 mod ir;
 mod operations;
 pub(crate) mod transforms;
-mod write;
+pub(crate) mod write;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -11,7 +12,9 @@ use bullet_compiler::{
     tensor::{IRTrace, OpType, TType, TValue, TensorOp, operation::SubGraph},
 };
 
+pub use builder::{CoercesToPointwiseNode, PointwiseBuf, PointwiseBuilder, PointwiseNode};
 pub use ir::PointwiseIR;
+pub use operations::PType;
 
 use crate::runtime::DeviceProps;
 
@@ -57,5 +60,9 @@ impl OpType for FusedPointwise {
 
     fn evaluate(&self, inputs: Vec<&TValue>, outputs: Vec<&mut TValue>) -> bool {
         self.sub.evaluate(inputs, outputs)
+    }
+
+    fn as_closure(&self) -> Option<(&str, &SubGraph)> {
+        Some((if self.vectorised { "vectorised.kernel" } else { "kernel" }, &self.sub))
     }
 }

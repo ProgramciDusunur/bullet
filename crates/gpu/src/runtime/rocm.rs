@@ -39,6 +39,7 @@ impl GpuBindings for ROCm {
     type Ptr = *mut c_void;
     type Ctx = c_int;
     type Stream = hipStream;
+    type Event = hipEvent;
     type BlasHandle = hipblasHandle;
     type Kernel = hipFunction;
     type Module = hipModule;
@@ -49,6 +50,12 @@ impl GpuBindings for ROCm {
 
     unsafe fn device_get(ordinal: c_int) -> Result<c_int, ROCmError> {
         Ok(ordinal)
+    }
+
+    unsafe fn device_count() -> Result<c_int, ROCmError> {
+        let mut count = 0;
+        error::runtime(hipGetDeviceCount(&mut count))?;
+        Ok(count)
     }
 
     unsafe fn device_props(device: c_int) -> Result<DeviceProps, ROCmError> {
@@ -62,7 +69,14 @@ impl GpuBindings for ROCm {
             vec_atomics: false,
             arch: None,
             dialect: Dialect::CudaHip,
+            is_rocm: true,
         })
+    }
+
+    unsafe fn device_can_access_peer(device: c_int, peer: c_int) -> Result<bool, ROCmError> {
+        let mut can_access = 0;
+        error::runtime(hipDeviceCanAccessPeer(&mut can_access, device, peer))?;
+        Ok(can_access != 0)
     }
 
     unsafe fn context_create(device: c_int) -> Result<c_int, ROCmError> {
@@ -79,6 +93,28 @@ impl GpuBindings for ROCm {
 
     unsafe fn context_sync() -> ROCmResult {
         error::runtime(hipDeviceSynchronize())
+    }
+
+    unsafe fn context_enable_peer_access(peer: c_int) -> ROCmResult {
+        let value = hipDeviceEnablePeerAccess(peer, 0);
+
+        if value == hipErrorPeerAccessAlreadyEnabled {
+            hipGetLastError();
+            return Ok(());
+        }
+
+        error::runtime(value)
+    }
+
+    unsafe fn context_disable_peer_access(peer: c_int) -> ROCmResult {
+        let value = hipDeviceDisablePeerAccess(peer);
+
+        if value == hipErrorPeerAccessNotEnabled {
+            hipGetLastError();
+            return Ok(());
+        }
+
+        error::runtime(value)
     }
 
     unsafe fn context_malloc(bytes: usize) -> Result<*mut c_void, ROCmError> {
@@ -101,6 +137,16 @@ impl GpuBindings for ROCm {
 
     unsafe fn context_memset(dev_ptr: *mut c_void, bytes: usize, value: u8) -> ROCmResult {
         error::runtime(hipMemsetD8(dev_ptr, value, bytes))
+    }
+
+    unsafe fn host_malloc(bytes: usize) -> Result<*mut c_void, ROCmError> {
+        let mut ptr = std::ptr::null_mut();
+        error::runtime(hipHostMalloc(&mut ptr, bytes, hipHostMallocPortable))?;
+        Ok(ptr)
+    }
+
+    unsafe fn host_free(ptr: *mut c_void, _bytes: usize) -> ROCmResult {
+        error::runtime(hipHostFree(ptr))
     }
 
     unsafe fn stream_create() -> Result<hipStream, ROCmError> {
@@ -137,6 +183,52 @@ impl GpuBindings for ROCm {
 
     unsafe fn stream_memcpy_h2d(stream: hipStream, dst: *mut c_void, src: *const c_void, bytes: usize) -> ROCmResult {
         error::runtime(hipMemcpyHtoDAsync(dst, src, bytes, stream))
+    }
+
+    unsafe fn stream_memcpy_d2d(
+        stream: hipStream,
+        dst: *mut c_void,
+        dst_offset: usize,
+        src: *mut c_void,
+        src_offset: usize,
+        bytes: usize,
+    ) -> ROCmResult {
+        let dst = dst.wrapping_byte_add(dst_offset);
+        let src = src.wrapping_byte_add(src_offset);
+        error::runtime(hipMemcpyDtoDAsync(dst, src, bytes, stream))
+    }
+
+    unsafe fn stream_memcpy_peer(
+        stream: hipStream,
+        dst: *mut c_void,
+        dst_ctx: c_int,
+        dst_offset: usize,
+        src: *mut c_void,
+        src_ctx: c_int,
+        src_offset: usize,
+        bytes: usize,
+    ) -> ROCmResult {
+        let dst = dst.wrapping_byte_add(dst_offset);
+        let src = src.wrapping_byte_add(src_offset);
+        error::runtime(hipMemcpyPeerAsync(dst, dst_ctx, src, src_ctx, bytes, stream))
+    }
+
+    unsafe fn event_create() -> Result<hipEvent, ROCmError> {
+        let mut event = hipEvent::default();
+        error::runtime(hipEventCreateWithFlags(&mut event, hipEventDisableTiming))?;
+        Ok(event)
+    }
+
+    unsafe fn event_destroy(event: hipEvent) -> ROCmResult {
+        error::runtime(hipEventDestroy(event))
+    }
+
+    unsafe fn event_record(event: hipEvent, stream: hipStream) -> ROCmResult {
+        error::runtime(hipEventRecord(event, stream))
+    }
+
+    unsafe fn stream_wait_event(stream: hipStream, event: hipEvent) -> ROCmResult {
+        error::runtime(hipStreamWaitEvent(stream, event, 0))
     }
 
     unsafe fn kernel_load(_kernel: hipFunction) -> ROCmResult {
@@ -297,13 +389,8 @@ mod error {
             Ok(())
         } else {
             unsafe {
-                let mut name = std::ptr::null();
-                hipGetErrorName(value, &mut name);
-                let name = CStr::from_ptr(name).to_str().unwrap();
-
-                let mut desc = std::ptr::null();
-                hipGetErrorString(value, &mut desc);
-                let desc = CStr::from_ptr(desc).to_str().unwrap();
+                let name = CStr::from_ptr(hipGetErrorName(value)).to_str().unwrap();
+                let desc = CStr::from_ptr(hipGetErrorString(value)).to_str().unwrap();
 
                 Err(ROCmError::Driver(format!("{name}: {desc}")))
             }
@@ -353,24 +440,41 @@ mod raw {
 
     pub type hipError = c_int;
     pub type hipStream = *mut Opaque;
+    pub type hipEvent = *mut Opaque;
     pub type hipFunction = *mut Opaque;
     pub type hipModule = *mut Opaque;
     pub type hipDeviceAttribute = u32;
 
-    pub const hipDeviceAttributeWarpSize: u32 = 89;
+    pub const hipDeviceAttributeWarpSize: u32 = 87;
+
+    pub const hipHostMallocPortable: c_uint = 0x01;
+
+    pub const hipEventDisableTiming: c_uint = 0x02;
+
+    pub const hipErrorPeerAccessAlreadyEnabled: hipError = 704;
+    pub const hipErrorPeerAccessNotEnabled: hipError = 705;
 
     unsafe extern "C" {
         // Errors
-        pub fn hipGetErrorString(error: hipError, pStr: *mut *const c_char) -> hipError;
-        pub fn hipGetErrorName(error: hipError, pStr: *mut *const c_char) -> hipError;
+        pub fn hipGetErrorString(error: hipError) -> *const c_char;
+        pub fn hipGetErrorName(error: hipError) -> *const c_char;
+        pub fn hipGetLastError() -> hipError;
 
         // Device
         pub fn hipSetDevice(device: c_int) -> hipError;
+        pub fn hipGetDeviceCount(count: *mut c_int) -> hipError;
         pub fn hipDeviceSynchronize() -> hipError;
         pub fn hipDeviceGetAttribute(pi: *mut c_int, attr: hipDeviceAttribute, deviceId: c_int) -> hipError;
+        pub fn hipDeviceCanAccessPeer(canAccessPeer: *mut c_int, deviceId: c_int, peerDeviceId: c_int) -> hipError;
+        pub fn hipDeviceEnablePeerAccess(peerDeviceId: c_int, flags: c_uint) -> hipError;
+        pub fn hipDeviceDisablePeerAccess(peerDeviceId: c_int) -> hipError;
         pub fn hipStreamCreate(stream: *mut hipStream) -> hipError;
         pub fn hipStreamDestroy(stream: hipStream) -> hipError;
         pub fn hipStreamSynchronize(stream: hipStream) -> hipError;
+        pub fn hipStreamWaitEvent(stream: hipStream, event: hipEvent, flags: c_uint) -> hipError;
+        pub fn hipEventCreateWithFlags(event: *mut hipEvent, flags: c_uint) -> hipError;
+        pub fn hipEventDestroy(event: hipEvent) -> hipError;
+        pub fn hipEventRecord(event: hipEvent, stream: hipStream) -> hipError;
 
         // Memory
         pub fn hipMalloc(dptr: *mut *mut c_void, bytesize: usize) -> hipError;
@@ -378,6 +482,8 @@ mod raw {
         pub fn hipMemsetD8(dstDevice: *mut c_void, uc: c_uchar, N: usize) -> hipError;
         pub fn hipMemcpyHtoD(dstDevice: *mut c_void, srcHost: *const c_void, ByteCount: usize) -> hipError;
         pub fn hipMemcpyDtoH(dstHost: *mut c_void, srcDevice: *mut c_void, ByteCount: usize) -> hipError;
+        pub fn hipHostMalloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> hipError;
+        pub fn hipHostFree(ptr: *mut c_void) -> hipError;
         pub fn hipMallocAsync(dptr: *mut *mut c_void, bytesize: usize, hStream: hipStream) -> hipError;
         pub fn hipFreeAsync(dptr: *mut c_void, hStream: hipStream) -> hipError;
         pub fn hipMemsetD8Async(dstDevice: *mut c_void, uc: c_uchar, N: usize, hStream: hipStream) -> hipError;
@@ -392,6 +498,20 @@ mod raw {
             srcDevice: *mut c_void,
             ByteCount: usize,
             hStream: hipStream,
+        ) -> hipError;
+        pub fn hipMemcpyDtoDAsync(
+            dstDevice: *mut c_void,
+            srcDevice: *mut c_void,
+            ByteCount: usize,
+            hStream: hipStream,
+        ) -> hipError;
+        pub fn hipMemcpyPeerAsync(
+            dst: *mut c_void,
+            dstDeviceId: c_int,
+            src: *const c_void,
+            srcDevice: c_int,
+            sizeBytes: usize,
+            stream: hipStream,
         ) -> hipError;
 
         // Kernel

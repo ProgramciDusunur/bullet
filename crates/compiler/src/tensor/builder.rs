@@ -20,7 +20,7 @@ impl IRBuilder {
 
     pub fn add_op<'a>(&'a self, inputs: impl AsRef<[TNode<'a>]>, op: impl OpType) -> Result<Vec<TNode<'a>>, IRTrace> {
         let ids = inputs.as_ref().iter().map(TNode::node).collect::<Vec<_>>();
-        let outs = self.ir.borrow_mut().add_op(ids, Ok::<_, IRTrace>(op)).unwrap();
+        let outs = self.ir.borrow_mut().add_op(ids, Ok::<_, IRTrace>(op))?;
         Ok(outs.into_iter().map(|out| self.new_node(out)).collect())
     }
 
@@ -240,6 +240,7 @@ impl std::ops::Neg for TNode<'_> {
         match self.ty().dtype() {
             DType::F32 => -1.0 * self,
             DType::I32 => -1 * self,
+            DType::F16 | DType::Bf16 => unimplemented!(),
         }
     }
 }
@@ -287,7 +288,7 @@ impl std::ops::Div<Self> for TNode<'_> {
     fn div(self, rhs: Self) -> Self::Output {
         match rhs.ty().dtype() {
             DType::F32 => self * rhs.unary(Unary::Reciprocal)?,
-            DType::I32 => unimplemented!(),
+            DType::F16 | DType::I32 | DType::Bf16 => unimplemented!(),
         }
     }
 }

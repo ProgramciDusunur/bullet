@@ -64,7 +64,10 @@ impl ModelWeights {
                 InitSettings::Zeroed => vec![0.0; size],
                 InitSettings::Uniform { mean, stdev } => vec_f32(&mut rng, size, *mean, *stdev, false),
                 InitSettings::Normal { mean, stdev } => vec_f32(&mut rng, size, *mean, *stdev, true),
-                InitSettings::Custom(value) => value.f32().to_vec(),
+                InitSettings::Custom(value) => {
+                    assert_eq!(size, value.size());
+                    value.f32().to_vec()
+                }
             };
 
             stores.insert(name.clone(), ShapedTValue { values: TValue::F32(init), shape: ty.shape() });
@@ -141,7 +144,7 @@ impl ModelWeights {
 
     pub fn write_to_device<G: Gpu>(&self, values: &TensorMap<G>) -> Result<(), G::Error> {
         for (id, val) in &self.stores {
-            values.get(id).ok_or(format!("No weight \"{id}\"!"))?.copy_from_host(&val.values)?;
+            values.get(id).ok_or_else(|| format!("No weight \"{id}\"!"))?.copy_from_host(&val.values)?;
         }
 
         Ok(())
@@ -149,7 +152,7 @@ impl ModelWeights {
 
     pub fn load_from_device<G: Gpu>(&mut self, values: &TensorMap<G>) -> Result<(), G::Error> {
         for (id, val) in &mut self.stores {
-            val.values = values.get(id).ok_or(format!("No weight \"{id}\"!"))?.to_host()?;
+            val.values = values.get(id).ok_or_else(|| format!("No weight \"{id}\"!"))?.to_host()?;
         }
 
         Ok(())
@@ -374,7 +377,9 @@ impl Dist {
         if use_gaussian {
             Self::Normal(Normal::new(mean, stdev).unwrap())
         } else {
-            Self::Uniform(Uniform::new(mean - stdev, mean + stdev).unwrap())
+            // U(a, b) has stdev (b - a) / sqrt(12)
+            let half_width = stdev * 3f32.sqrt();
+            Self::Uniform(Uniform::new_inclusive(mean - half_width, mean + half_width).unwrap())
         }
     }
 
